@@ -49,16 +49,22 @@
 
 ---
 
-### 模块 2：分级公共主题通信总线 (Hierarchical Topic Bus - Pub/Sub)
+### 模块 2：控制信号总线与点对点信箱 (Signal Bus & P2P Mailbox)
 
-- **核心裁决**：
-  1. **树状命名空间分流**：
-     - `swarm/announcements`：全局广播重大进展与全局刹车信号（严格限频）。
-     - `task/<taskId>`：模块攻坚与方案辩论子频道。
-     - `agent/<agentId>/inbox`：点对点求助私信。
-  2. **拉取优先与精准抢占 (Pull-First & Steer Wakeup)**：
-     - 普通信道消息采用拉取（Pull）模式，绝不无脑强塞 Agent 上下文。
-     - 仅当收到精准的点对点私信或全局紧急叫停时，利用原插件现成的 `triggerTurn: true, deliverAs: 'steer'` 通道毫秒级强行打断唤醒。
+- **设计范式与核心价值**：
+  - **杜绝群聊闲聊反模式**：总线绝非用于多 Agent 坐在一起打嘴炮的群聊室，而是兼具“状态机事件驱动”与“毫秒级物理打断/唤醒”的双向神经中枢。
+  - **分级频道与对齐行业标准**：对标 Claude Code 2026 Agent Teams（`SendMessage` / `TaskList`）与 OpenAI 状态移交架构，兼顾全群系统级防灾控制与点对点跨工位精准协同。
+
+- **核心裁决与三级信道矩阵**：
+  1. **公共应急大喇叭频道 (`swarm/announcements`)**：
+     - 仅广播机器级全局控制事件：全群快速剪枝信号 (`task.dead_end`)、全局物理熔断信号 (`swarm.abort`)、新任务发布广播；全员监听，杜绝重复踏坑。
+  2. **点对点专属信箱频道 (`agent/<recipientId>/inbox`)**：
+     - 承载 Worker 之间的精确单播业务协同（例如后端向前端同步 API 结构变更、前置依赖就绪通知、向主 Agent 发起卡点求助）；
+     - 物理底层基于 `.pi/messenger/inbox/<recipient>.jsonl` 文件信箱，阅后即焚，绝不打扰无关第三方节点，彻底杜绝上下文雪崩。
+  3. **同行感知与自省工具集 (Peer Awareness & Self-Inspection Toolbox)**：
+     - `send <recipient> <msg>`：定向发信给指定同伴或主 Agent；
+     - `peers --task <taskId>`：查询当前有哪些同行正在攻坚同一个目标；
+     - `status --self`：改代码时随时自省自身沙箱路径、租约剩余倒计时、端口分配与剩余重试配额（防剪枝）。
 
 ---
 
@@ -186,14 +192,23 @@
 
 ---
 
-### 模块 6：受控交付与直接合并权限 (Direct Verified Merge Protocol)
+### 模块 6：受控交付与直接原子合并 (Direct Verified Atomic Merge Protocol)
 
-- **核心裁决**：
-  1. **蜂群拥有端到端合并权限**：
-     - 蜂群节点拥有明确、受控的代码修改与合并权限，不仅仅是给建议。
-     - 胜出的 Agent 在沙箱里**确认所有单元测试 100% 跑通后，直接拥有权限将经过验证的补丁（`git apply`）合并至主代码库**。
-  2. **主 Agent 轻松验收**：
-     - 主 Agent 唤醒后，直接面对一个已经修改完毕、测试通过的干净主工程，只需做最终 Git 状态核对，即可向人类交差。
+- **设计范式与核心价值 (ADR 0001 裁决)**：
+  - **信奉客观机器裁判**：坚定践行 OpenAI Noam Brown 哲学，退出码 Exit Code 0 是最高信任背书，摒弃人工二次审查与冗余的影子分支。
+  - **原子入库与基线锁定**：沙箱通过客观测试且通过预检后，系统自动直接原子 commit 到宿主 `main` 分支，为后续并行 Worker 提供确定的 Rebase 基线。
+
+- **核心裁决与三阶段原子合并协议**：
+  1. **阶段 1：宿主主干 Git 预检碰撞 (`git apply --check`)**：
+     - Worker 沙箱生成 `.patch` 物理补丁后，宿主首先执行 `git apply --check <taskId>.patch` 预检是否与当前主干发生代码行级冲突。
+  2. **阶段 2：原子合入与标准 Commit**：
+     - 若预检无冲突，宿主立即执行 `git apply` 并自动提交 Git Commit：  
+       `feat(swarm): verify & merge <taskId> by <workerId> [Exit 0]`  
+       提交信息内完整附带任务描述、验证命令与补丁 SHA。
+  3. **阶段 3：冲突变基重测机制 (Rebase-on-Conflict)**：
+     - 若预检发现主干已演进（存在合并冲突），门禁绝对禁止无序合并，通过 Steer 注入打回该沙箱：  
+       _"Main branch evolved with conflicts. Rebase your sandbox onto latest HEAD and re-run verification tests!"_
+     - Worker 在自身沙箱内执行 `git rebase main` 并在沙箱内解决冲突，重新跑通 Exit 0 验证后方可再次触发合并；连续 3 次失败自动进入 Graveyard 剪枝。
 
 ---
 
@@ -224,11 +239,23 @@
 
 ---
 
+### 展示层：观察者上下文准入与控制三指令 (Observer Context Admission & Triple Commands)
+
+- **设计范式与核心价值 (ADR 0002 裁决)**：
+  - **摒弃重型全屏 TUI 干扰**：不打断人类开发者正常的终端对话流，依托单文件 `<1000 tokens` 的 `BLACKBOARD.md` 投影，实现主 Agent 零上下文损耗的智能态势解读。
+- **三指令交互规范**：
+  1. **`status`**：在终端打印高亮、紧凑的四区快照 ANSI 概览卡片及活跃 Worker PID；
+  2. **`explain`**（或自然语言向主 Agent 提问）：触发主 Agent 深度解读当前黑板快照，输出客观进展、已合并黄金事实与避坑死因总结；
+  3. **`abort`**（或按 `ESC` 键）：广播 `SIG_ABORT` 物理刹车，看门狗批量负 PID 强杀所有沙箱进程并回收目录。
+
+---
+
 ## 三、 当前整体工程状态与路线图 (Roadmap Status)
 
 - [x] **Phase 1: 核心理念与架构裁决收敛** —— 全部对齐确立
-- [x] **Phase 2: 模块 1（扁平对等与脚手架瘦身）** —— 代码已落地，全量 359 项测试 100% 通过
-- [x] **Phase 3: 模块 3 & 4 联动（四区黑板快照生成器 + 提交测试门禁钩子 + 自愈与剪枝）** —— 代码已落地，通过独立胜利审计，全量 54 个测试套件、429 项测试 100% 通过
-- [x] **Phase 4: 模块 7 落地（`--detach` Worktree 专属隔离沙箱分配与回收 + 运行时隔离）** —— 代码已落地，全量 55 个测试套件、435 项测试 100% 通过
-- [ ] **Phase 5: 模块 5 & 6 落地（物理看门狗 ps 托管与全灭兜底 + 验证通过受控直接合并）**
-- [ ] **Phase 6: TUI 监控看板适配（纯粹观察者仪表盘与一键刹车键）**
+- [x] **Phase 2: 模块 1（扁平对等与脚手架瘦身）** —— 代码已落地，全量测试通过
+- [x] **Phase 3: 模块 3 & 4 联动（四区黑板快照生成器 + 提交测试门禁钩子 + 自愈与剪枝）** —— 代码已落地，全量测试通过
+- [x] **Phase 4: 模块 7 落地（`--detach` Worktree 专属隔离沙箱分配与回收 + 运行时隔离）** —— 代码已落地，全量测试通过
+- [x] **Phase 5 Part A: 模块 5 落地（物理看门狗 ps 托管、租约回收、全灭兜底与步数熔断）** —— 代码已落地，全量 59 套件、463 项测试 100% 通过
+- [ ] **Phase 5 Part B: 模块 6 落地（受控直接原子合并到 main + Rebase-on-Conflict 冲突变基重测）**
+- [ ] **Phase 6: 观察者上下文准入与三指令落地（`status`, `explain`, `abort`）**
