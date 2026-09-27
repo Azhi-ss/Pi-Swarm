@@ -50,4 +50,9 @@ export interface MessengerActionParams {
   agentFile?: string;
   messageFile?: string;
   force?: boolean;
+
+  // Process / Watchdog
+  all?: boolean;
+  workerId?: string;
+  lines?: number;
 }

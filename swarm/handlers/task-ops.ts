@@ -11,6 +11,7 @@ import { taskClaim, taskStake, taskUnclaim, taskDone, taskReset } from './task-l
 import { taskBlock, taskUnblock } from './task-block.js';
 import { taskDelete, taskArchiveDone } from './task-archive.js';
 import { taskProgress } from './task-progress.js';
+import { circuitBreaker } from '../circuit-breaker/index.js';
 
 export function taskPropose(
   params: MessengerActionParams,
@@ -19,6 +20,13 @@ export function taskPropose(
   channelId: string,
   sessionId: string
 ) {
+  if (circuitBreaker.isTripped()) {
+    return result('Error: Circuit breaker is tripped. Task proposals are locked.', {
+      mode: 'task.propose',
+      error: 'circuit_broken',
+    });
+  }
+
   const taskId = params.id ?? params.taskId;
   if (!taskId) {
     return result('Error: id or taskId required for task.propose', {
@@ -67,6 +75,13 @@ export function taskChallenge(
   channelId: string,
   sessionId: string
 ) {
+  if (circuitBreaker.isTripped()) {
+    return result('Error: Circuit breaker is tripped. Task challenges are locked.', {
+      mode: 'task.challenge',
+      error: 'circuit_broken',
+    });
+  }
+
   const taskId = params.id ?? params.taskId;
   if (!taskId) {
     return result('Error: id or taskId required for task.challenge', {

@@ -16,7 +16,14 @@ export type TaskEventType =
   | 'reset'
   | 'archived'
   | 'proposed'
-  | 'challenged';
+  | 'challenged'
+  | 'swarm.abort';
+
+export interface SwarmAbortPayload {
+  reason?: string;
+  consumedSteps?: number;
+  maxSteps?: number;
+}
 
 export interface TaskEvent {
   taskId: string;

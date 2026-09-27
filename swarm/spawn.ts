@@ -17,6 +17,8 @@ import {
   pruneWorktrees,
   getWorktreeInfo,
 } from './worktree/index.js';
+import { processManager, forceKillProcessGroup } from './process-manager.js';
+import { circuitBreaker } from './circuit-breaker/index.js';
 
 interface SpawnRuntime {
   process: ChildProcess;
@@ -342,13 +344,21 @@ function attachHandlers(
   sessionId: string
 ) {
   proc.stdout?.on('data', (data: Buffer | string) => {
-    state.buffer += data.toString();
+    const text = data.toString();
+    processManager.appendLog(state.id, 'stdout', text);
+    state.buffer += text;
     const lines = state.buffer.split('\n');
     state.buffer = lines.pop() ?? '';
 
     for (const line of lines) {
       const event = parseJsonlLine(line);
       if (!event) continue;
+      if (event.type === 'tool_execution_end') {
+        circuitBreaker.recordStep(state.name, (event as any).toolName, {
+          cwd: state.cwd,
+          sessionId,
+        });
+      }
       updateProgress(state.progress, event, state.startMs);
       updateLiveWorker(state.cwd, state.request.taskId || spawnLiveKey(state.id), {
         taskId: state.request.taskId || spawnLiveKey(state.id),
@@ -365,12 +375,15 @@ function attachHandlers(
   });
 
   proc.stderr?.on('data', (data: Buffer | string) => {
-    state.stderr += data.toString();
+    const text = data.toString();
+    processManager.appendLog(state.id, 'stderr', text);
+    state.stderr += text;
   });
 
   proc.on('error', (err) => {
     cleanupTmpDir(promptTmpDir);
     removeWorktree(state.cwd, state.id);
+    processManager.cleanup(state.id);
     const runtime = runtimes.get(state.id);
     if (!runtime) return;
 
@@ -400,6 +413,7 @@ function attachHandlers(
     cleanupTmpDir(promptTmpDir);
     removeWorktree(state.cwd, state.id);
     removeLiveWorker(state.cwd, state.request.taskId || spawnLiveKey(state.id));
+    processManager.cleanup(state.id);
 
     const runtime = runtimes.get(state.id);
     if (!runtime) return;
@@ -455,6 +469,9 @@ export function spawnSubagent(
   sessionId: string,
   inheritedChannel?: string
 ): SpawnedAgent {
+  if (circuitBreaker.isTripped()) {
+    throw new Error('Circuit breaker is tripped: spawn rejected');
+  }
   const id = randomUUID().slice(0, 8);
   const name = request.name?.trim() || generateMemorableName();
   const startedAt = new Date().toISOString();
@@ -559,6 +576,48 @@ export function spawnSubagent(
 
   attachHandlers(proc, spawnState, promptTmpDir, sessionId);
 
+  processManager.register(
+    {
+      id,
+      name: `[Swarm] worker-${id}`,
+      agentName: name,
+      pid: proc.pid!,
+      cwd,
+      worktreePath: worktree.worktreePath,
+      port: worktree.port,
+      testPort: worktree.testPort,
+      startedAt,
+      status: 'running',
+      timeoutMs: 600_000,
+    },
+    proc,
+    () => {
+      const runtime = runtimes.get(id);
+      if (runtime) {
+        runtime.record = {
+          ...runtime.record,
+          status: 'failed',
+          endedAt: new Date().toISOString(),
+          exitCode: 137,
+          error: 'Process timed out after 600000ms (10m hard limit)',
+        };
+        runtime.persisted = true;
+        appendEvent(cwd, sessionId, {
+          id,
+          type: 'failed',
+          timestamp: runtime.record.endedAt,
+          agent: {
+            status: 'failed',
+            endedAt: runtime.record.endedAt,
+            exitCode: 137,
+            error: runtime.record.error,
+          },
+        });
+        generateAgentFile(cwd, sessionId, runtime.record);
+      }
+    }
+  );
+
   runtimes.set(id, {
     process: proc,
     record,
@@ -638,6 +697,7 @@ function killPidGroup(pid: number, signal: NodeJS.Signals = 'SIGTERM'): void {
 }
 
 export function stopSpawn(cwd: string, id: string): boolean {
+  processManager.kill(id, 'SIGTERM');
   const runtime = runtimes.get(id);
   if (!runtime) return false;
   if (runtime.record.cwd !== cwd) return false;
@@ -672,6 +732,7 @@ export function stopSpawn(cwd: string, id: string): boolean {
 }
 
 export function stopAllSpawned(cwd?: string): void {
+  processManager.killAll('SIGTERM');
   for (const [id, runtime] of runtimes.entries()) {
     if (cwd && runtime.record.cwd !== cwd) continue;
     if (runtime.detached) {
@@ -703,6 +764,7 @@ export function stopAllSpawned(cwd?: string): void {
 }
 
 export function forceKillAllSpawned(cwd?: string): void {
+  processManager.killAll('SIGKILL');
   for (const [_id, runtime] of runtimes.entries()) {
     if (cwd && runtime.record.cwd !== cwd) continue;
     if (runtime.detached) {

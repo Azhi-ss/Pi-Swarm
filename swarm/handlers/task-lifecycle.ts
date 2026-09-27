@@ -10,6 +10,7 @@ import * as fs from 'node:fs';
 import { listSpawned } from '../spawn.js';
 import { runVerification, detectProjectTestCommand, generatePatch } from '../verifier/index.js';
 import { getWorktreeInfo } from '../worktree/index.js';
+import { circuitBreaker } from '../circuit-breaker/index.js';
 
 export function taskClaim(
   params: MessengerActionParams,
@@ -18,6 +19,13 @@ export function taskClaim(
   channelId: string,
   sessionId: string
 ) {
+  if (circuitBreaker.isTripped()) {
+    return result('Error: Circuit breaker is tripped. Task mutations are locked.', {
+      mode: 'task.claim',
+      error: 'circuit_broken',
+    });
+  }
+
   if (!params.id)
     return result('Error: id required for task.claim', { mode: 'task.claim', error: 'missing_id' });
 
@@ -90,6 +98,13 @@ export function taskStake(
   channelId: string,
   sessionId: string
 ) {
+  if (circuitBreaker.isTripped()) {
+    return result('Error: Circuit breaker is tripped. Task mutations are locked.', {
+      mode: 'task.stake',
+      error: 'circuit_broken',
+    });
+  }
+
   if (!params.id)
     return result('Error: id required for task.stake', { mode: 'task.stake', error: 'missing_id' });
 

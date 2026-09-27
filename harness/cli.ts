@@ -751,6 +751,37 @@ Environment:
       break;
     }
 
+    case 'ps': {
+      const sub = args[0];
+      if (sub === 'logs') {
+        const id = args[1];
+        if (!id) {
+          process.stderr.write('Error: ps logs requires <workerId>.\n');
+          process.exit(1);
+        }
+        await postAction(buildAction({ action: 'ps.logs', id }));
+        break;
+      }
+      if (sub === 'kill') {
+        const id = args[1];
+        if (!id) {
+          process.stderr.write('Error: ps kill requires <workerId>.\n');
+          process.exit(1);
+        }
+        await postAction(buildAction({ action: 'ps.kill', id }));
+        break;
+      }
+      const showAll = extractFlagBool(args, 'all');
+      await postAction(buildAction({ action: 'ps.list', all: showAll || undefined }));
+      break;
+    }
+
+    case 'abort': {
+      const reason = extractFlag(args, 'reason') ?? args.join(' ');
+      await postAction(buildAction({ action: 'swarm.abort', reason: reason || undefined }));
+      break;
+    }
+
     // ---- Tasks ----
     case 'task': {
       const sub = args.shift();

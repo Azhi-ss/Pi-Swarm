@@ -295,6 +295,10 @@ export function replayEventsToMap(cwd: string, sessionId: string): Map<string, S
           existing.updated_at = event.timestamp;
           break;
         }
+
+        case 'swarm.abort': {
+          break;
+        }
       }
     } catch {
       // Skip malformed lines

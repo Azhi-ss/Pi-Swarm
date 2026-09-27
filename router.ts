@@ -9,6 +9,8 @@ import type { MessengerActionParams } from './action-types.js';
 import { result } from './swarm/result.js';
 import { executeSpawn, executeSwarmStatus, executeTask } from './swarm/handlers.js';
 import { getEffectiveSessionId } from './store/shared.js';
+import { processManager } from './swarm/process-manager.js';
+import { circuitBreaker } from './swarm/circuit-breaker/index.js';
 
 type DeliverFn = (msg: AgentMailMessage) => void;
 type UpdateStatusFn = (ctx: ExtensionContext) => void;
@@ -146,8 +148,83 @@ export async function executeAction(
       }
       return handlers.executeRename(state, dirs, ctx, params.name, deliverMessage, updateStatus);
 
-    case 'swarm':
+    case 'swarm': {
+      if (op === 'abort') {
+        const reason = (params.reason as string) || 'Swarm abort requested';
+        await circuitBreaker.triggerAbort(cwd, sessionId, reason);
+        return result(`🛑 Swarm aborted: ${reason}`, {
+          mode: 'swarm.abort',
+          aborted: true,
+          reason,
+        });
+      }
       return executeSwarmStatus(cwd, params.channel ?? requireChannel(), sessionId);
+    }
+
+    case 'abort': {
+      const reason = (params.reason as string) || 'Manual abort requested';
+      await circuitBreaker.triggerAbort(cwd, sessionId, reason);
+      return result(`🛑 Swarm aborted: ${reason}`, { mode: 'swarm.abort', aborted: true, reason });
+    }
+
+    case 'ps': {
+      const operation = op ?? 'list';
+      if (operation === 'list') {
+        const workers = processManager.list(params.all === true);
+        if (workers.length === 0) {
+          return result('No running swarm workers.', { mode: 'ps.list', workers: [] });
+        }
+        const lines = [
+          '| ID | Name | Agent | PID | Status | Started |',
+          '|---|---|---|---|---|---|',
+        ];
+        for (const w of workers) {
+          lines.push(
+            `| ${w.id} | ${w.name} | ${w.agentName} | ${w.pid} | ${w.status} | ${w.startedAt} |`
+          );
+        }
+        return result(lines.join('\n'), { mode: 'ps.list', workers });
+      }
+      if (operation === 'logs') {
+        const id = (params.id ?? params.workerId) as string;
+        if (!id) {
+          return result('Error: worker id required for ps logs', {
+            mode: 'ps.logs',
+            error: 'missing_id',
+          });
+        }
+        const maxLines = typeof params.lines === 'number' ? params.lines : 100;
+        const logs = processManager.getLogs(id, maxLines);
+        const text = `=== Worker ${id} Logs ===\n--- STDOUT ---\n${logs.stdout || '(no stdout)'}\n--- STDERR ---\n${logs.stderr || '(no stderr)'}`;
+        return result(text, { mode: 'ps.logs', id, ...logs });
+      }
+      if (operation === 'kill') {
+        const id = (params.id ?? params.workerId) as string;
+        if (!id) {
+          return result('Error: worker id required for ps kill', {
+            mode: 'ps.kill',
+            error: 'missing_id',
+          });
+        }
+        const stopped = processManager.kill(id);
+        if (!stopped) {
+          return result(`Error: worker ${id} not found`, {
+            mode: 'ps.kill',
+            error: 'not_found',
+            id,
+          });
+        }
+        return result(`Worker ${id} terminated and sandbox cleaned.`, {
+          mode: 'ps.kill',
+          id,
+          stopped: true,
+        });
+      }
+      return result(`Unknown ps operation: ${operation}`, {
+        mode: 'ps',
+        error: 'unknown_operation',
+      });
+    }
 
     case 'task': {
       const operation = op ?? 'list';

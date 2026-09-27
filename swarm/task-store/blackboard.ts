@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import type { SwarmTask } from '../types.js';
 import { getAllTasks, getSummaryForTasks } from './queries.js';
 import { isProcessAlive } from '../../lib.js';
+import { circuitBreaker } from '../circuit-breaker/index.js';
 
 interface ActivePeerInfo {
   name: string;
@@ -84,6 +85,16 @@ export function generateBlackboard(cwd: string, sessionId: string): string {
   lines.push(
     `> Progress: Total: ${summary.total} | Goals: ${goalTasks.length} | Staked: ${stakedTasks.length} | Verified: ${verifiedTasks.length} | Dead Ends: ${graveyardTasks.length}`
   );
+  const budget = circuitBreaker.getStatus();
+  if (budget.isTripped) {
+    lines.push(
+      `> 🛑 **CIRCUIT BREAKER TRIPPED**: ${budget.consumedSteps}/${budget.maxSteps} steps exceeded | Blackboard LOCKED | Swarm Aborted`
+    );
+  } else {
+    lines.push(
+      `> Step Budget: ${budget.consumedSteps}/${budget.maxSteps} steps consumed (${budget.remainingSteps} remaining) | Status: HEALTHY`
+    );
+  }
   lines.push('');
 
   // Active Peers

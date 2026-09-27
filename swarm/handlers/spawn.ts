@@ -16,6 +16,7 @@ import {
 } from '../spawn.js';
 import type { SpawnRequest } from '../types.js';
 import { formatRoleLabel } from '../labels.js';
+import { circuitBreaker } from '../circuit-breaker/index.js';
 
 export function executeSpawn(
   op: string | null,
@@ -175,6 +176,13 @@ function spawnCreate(
   sessionId: string,
   maxConcurrentSpawns?: number
 ) {
+  if (circuitBreaker.isTripped()) {
+    return result('Error: Circuit breaker is tripped. Spawning new agents is locked.', {
+      mode: 'spawn',
+      error: 'circuit_broken',
+    });
+  }
+
   // Guardrail: if the user has ready tasks but forgot --task-id, warn them
   // instead of letting an unbound agent float and accidentally claim/create
   // tasks that collide with the coordinator's intent.

@@ -45,6 +45,9 @@ import { handleHashInput } from './extension/handle-input.js';
 import { syncDirsFromServer } from './extension/sync-dirs.js';
 import { splitCliArgs } from './harness/commands.js';
 import { handleSessionShutdown } from './extension/shutdown.js';
+import { processManager } from './swarm/process-manager.js';
+import { WatchdogService } from './swarm/watchdog/index.js';
+import { circuitBreaker } from './swarm/circuit-breaker/index.js';
 
 let overlayTui: TUI | null = null;
 let overlayHandle: OverlayHandle | null = null;
@@ -270,6 +273,58 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     },
   });
 
+  let watchdogService: WatchdogService | null = null;
+
+  const hasPiProcesses =
+    typeof (pi.events as any)?.listenerCount === 'function' &&
+    (pi.events as any).listenerCount('processes:command:adopt') > 0;
+
+  if (!hasPiProcesses) {
+    pi.registerCommand('ps', {
+      description: 'List active swarm worker processes',
+      handler: async (_args, ctx) => {
+        const workers = processManager.list();
+        if (workers.length === 0) {
+          ctx.ui?.notify('No running swarm workers.', 'info');
+          return;
+        }
+        const lines = workers.map((w) => `${w.id}: ${w.name} (pid: ${w.pid}, status: ${w.status})`);
+        ctx.ui?.notify(lines.join('\n'), 'info');
+      },
+    });
+
+    pi.registerCommand('ps:logs', {
+      description: 'View logs for a swarm worker process: /ps:logs <id>',
+      handler: async (args, ctx) => {
+        const id = args[0];
+        if (!id) {
+          ctx.ui?.notify('Usage: /ps:logs <workerId>', 'error');
+          return;
+        }
+        const logs = processManager.getLogs(id);
+        const text = `=== Worker ${id} Logs ===\nSTDOUT:\n${logs.stdout || '(none)'}\nSTDERR:\n${logs.stderr || '(none)'}`;
+        ctx.ui?.notify(text, 'info');
+      },
+    });
+
+    pi.registerCommand('ps:kill', {
+      description: 'Force kill a swarm worker process: /ps:kill <id>',
+      handler: async (args, ctx) => {
+        const id = args[0];
+        if (!id) {
+          ctx.ui?.notify('Usage: /ps:kill <workerId>', 'error');
+          return;
+        }
+        const stopped = processManager.kill(id);
+        if (stopped) {
+          ctx.ui?.notify(`Worker ${id} killed.`, 'info');
+        } else {
+          ctx.ui?.notify(`Worker ${id} not found.`, 'error');
+        }
+      },
+    });
+  }
+
   pi.registerMessageRenderer<AgentMailMessage>('agent_message', (message, _options, theme) => {
     const details = message.details;
     if (!details) return undefined;
@@ -331,6 +386,24 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
       } catch {
         // Best effort
       }
+
+      watchdogService = new WatchdogService(
+        process.cwd(),
+        sessionId,
+        { pollIntervalMs: 5000, leaseTtlSeconds: 300 },
+        (payload) => {
+          void pi.sendMessage(
+            {
+              customType: payload.customType,
+              content: payload.content,
+              display: payload.display ?? true,
+              details: payload.details,
+            },
+            { triggerTurn: true, deliverAs: 'steer' }
+          );
+        }
+      );
+      watchdogService.start();
     }
 
     // Install the CLI wrapper so all child bash processes
@@ -413,6 +486,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
   pi.on('session_shutdown', async () => {
     const cwd = process.cwd();
     stopAllSpawned(cwd); // In-process safety net for extension-spawned agents
+    watchdogService?.stop();
     stopStatusHeartbeat();
     // Do NOT send /quit to the harness server on session shutdown.
     // The harness is a long-lived daemon (detached + unref'd) designed to
@@ -481,6 +555,17 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
   });
 
   pi.on('tool_call', async (event, ctx) => {
+    circuitBreaker.recordStep(state.agentName || 'main', event.toolName, {
+      cwd: process.cwd(),
+      sessionId: state.contextSessionId,
+    });
+    if (circuitBreaker.isTripped()) {
+      return {
+        block: true,
+        reason:
+          '🛑 CIRCUIT BREAKER TRIPPED: Global step budget exceeded (50 steps max). All tool executions halted.',
+      };
+    }
     return handleReservationEnforcement(event, ctx, state, dirs);
   });
 }

@@ -50,7 +50,8 @@ export type FeedEventType =
   | 'plan.done'
   | 'plan.cancel'
   | 'plan.failed'
-  | 'stuck';
+  | 'stuck'
+  | 'swarm.abort';
 
 export interface FeedEvent {
   ts: string;
@@ -288,6 +289,7 @@ const SWARM_EVENT_TYPES = new Set<FeedEventType>([
   'plan.done',
   'plan.cancel',
   'plan.failed',
+  'swarm.abort',
 ]);
 
 export function formatFeedLine(event: FeedEvent): string {

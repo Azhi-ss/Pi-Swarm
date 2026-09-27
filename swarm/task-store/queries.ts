@@ -5,6 +5,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { isProcessAlive } from '../../lib.js';
 import { logFeedEvent } from '../../feed/index.js';
+import { writeBlackboard } from './blackboard.js';
 
 // Throttled cleanup tracking per cwd+sessionId
 const lastCleanupTime = new Map<string, number>();
@@ -128,6 +129,12 @@ function cleanupStaleTaskClaims(cwd: string, sessionId: string): number {
       );
       cleaned++;
     }
+  }
+
+  if (cleaned > 0) {
+    try {
+      writeBlackboard(cwd, sessionId);
+    } catch {}
   }
 
   return cleaned;
