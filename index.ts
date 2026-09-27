@@ -323,15 +323,8 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     // Write the session ID to disk so the harness server (and CLI)
     // can discover it. The harness runs as a separate process and
     // has no access to pi's SessionManager — this file bridges that gap.
-    //
-    // IMPORTANT: Skip for spawned subagents (PI_SWARM_SPAWNED=1).
-    // Subagents share the same project directory as the parent, so
-    // writing their session ID would overwrite the parent's file.
-    // The next parent CLI call would then read the child's session ID
-    // and trigger a spurious session-mismatch reset, creating orphan
-    // session channels.
     const sessionId = getContextSessionId(ctx);
-    if (sessionId && !process.env.PI_SWARM_SPAWNED) {
+    if (sessionId) {
       try {
         const sessionFilePath = join(dirs.base, 'session-id');
         fs.writeFileSync(sessionFilePath, sessionId, 'utf-8');
@@ -349,21 +342,19 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
 
     // Start the harness server even without auto-register —
     // the model needs it for CLI actions regardless.
-    if (!process.env.PI_SWARM_SPAWNED) {
-      harnessServer.start();
-      // Sync the extension's dirs to the running server's dataDir so that
-      // direct filesystem reads (e.g. # autocomplete candidates) always use
-      // the same registry as the harness server.
-      //
-      // Background: the harness server is a singleton process that may have
-      // been started by a different pi session with a different working
-      // directory or PI_MESSENGER_DIR.  The extension computes its own
-      // dirs at startup from process.cwd(), which may not match the server's
-      // dataDir — causing getActiveAgents() to read an empty (or wrong)
-      // registry and silently return no peers for autocomplete.
-      // Best-effort: errors are absorbed inside syncDirsFromServer.
-      void syncDirsFromServer(dirs);
-    }
+    harnessServer.start();
+    // Sync the extension's dirs to the running server's dataDir so that
+    // direct filesystem reads (e.g. # autocomplete candidates) always use
+    // the same registry as the harness server.
+    //
+    // Background: the harness server is a singleton process that may have
+    // been started by a different pi session with a different working
+    // directory or PI_MESSENGER_DIR.  The extension computes its own
+    // dirs at startup from process.cwd(), which may not match the server's
+    // dataDir — causing getActiveAgents() to read an empty (or wrong)
+    // registry and silently return no peers for autocomplete.
+    // Best-effort: errors are absorbed inside syncDirsFromServer.
+    void syncDirsFromServer(dirs);
 
     if (!shouldAutoRegister) {
       return;

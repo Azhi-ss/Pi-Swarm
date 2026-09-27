@@ -138,3 +138,11 @@ export function taskReady(cwd: string, channelId: string, sessionId: string) {
     ready,
   });
 }
+
+export function taskBlackboard(cwd: string, sessionId: string) {
+  const content = taskStore.writeBlackboard(cwd, sessionId);
+  return result(content, {
+    mode: 'task.blackboard',
+    content,
+  });
+}

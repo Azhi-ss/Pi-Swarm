@@ -76,6 +76,6 @@ describe('swarm spawn channel inheritance', () => {
 
     const env = spawnMock.mock.calls[0][2]?.env as Record<string, string>;
     expect(env.PI_MESSENGER_CHANNEL).toBe('session-parent');
-    expect(env.PI_SWARM_SPAWNED).toBe('1');
+    expect(env.PI_SWARM_SPAWNED).toBeUndefined();
   });
 });

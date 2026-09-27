@@ -11,8 +11,12 @@ import { removeLiveWorker, updateLiveWorker } from './live-progress.js';
 import type { SpawnRequest, SpawnedAgent } from './types.js';
 import { formatRoleLabel } from './labels.js';
 import { loadAgentDefinition } from './agent-loader.js';
-
-const AGENT_END_DESPAWN_MS = 10 * 60 * 1000;
+import {
+  createWorktree,
+  removeWorktree,
+  pruneWorktrees,
+  getWorktreeInfo,
+} from './worktree/index.js';
 
 interface SpawnRuntime {
   process: ChildProcess;
@@ -171,30 +175,25 @@ function generateAgentFile(cwd: string, sessionId: string, agent: SpawnedAgent):
 function buildSwarmProtocol(): string {
   return [
     '## Swarm Operating Protocol',
-    '1. Join the mesh first: `pi-messenger-swarm join`.',
-    '2. Coordinate via messaging/reservations/task actions before risky edits.',
-    '3. Task claiming is required: If assigned a taskId, claim it before beginning work: `pi-messenger-swarm task claim <taskId>`. Failure to claim indicates another agent owns it; report the conflict and await further instruction.',
-    '4. You were spawned by a coordinator agent. That agent delegated this task to you — it will NOT claim or implement this task itself. You own it.',
-    '5. Progress updates are required: Update task progress every 3-5 tool calls or at significant milestones: `pi-messenger-swarm task progress <taskId> "Specific achievement and rationale"`.',
-    '6. Task completion is required: Mark the task done upon mission completion: `pi-messenger-swarm task done <taskId> "Concrete accomplishment with evidence"`.',
-    '6.5 Report findings IN the task.done summary or task.progress messages — not just in your response text. The coordinator reads your output via `pi-messenger-swarm task show <taskId>`, so all findings must be in the task record. The feed only shows one-line previews.',
-    '7. Be concise, evidence-based, and stay in role.',
-    '8. Clarify ambiguity early: if mission scope, expected output format, or framing is unclear or seems incomplete, send a brief targeted question via `pi-messenger-swarm send AgentName "..."` before proceeding. A 30-second alignment check prevents off-target work.',
-    '9. Check channel feed between turns: `pi-messenger-swarm feed --limit 10`. If a teammate sent you a message, respond before proceeding. Messages are channel-mediated — reading the feed is required to receive them. This is pull-based: nobody pushes messages to you.',
-    '10. Exit immediately after marking task done: `bash({ command: "exit 0" })`. Do not stay alive after your mission is complete. Do not monitor the feed, wait for messages, or idle. Once you have called `pi-messenger-swarm task done`, you are done — exit right after. Remaining alive wastes resources and signals incomplete work.',
+    '1. Peer Mesh & Identity: You are an autonomous peer agent in a decentralized swarm mesh (`pi-messenger-swarm join`). All peers have equal access and standing; there is no central orchestrator.',
+    '2. Consult Blackboard First: Inspect active tasks, goals, hypotheses, and verified artifacts before acting (`pi-messenger-swarm task list` / `feed`). Avoid duplicate work and heed documented dead ends.',
+    '3. Autonomous Proposal & Staking: Claim tasks or propose concrete strategies (`pi-messenger-swarm task claim <taskId>` or `pi-messenger-swarm propose <taskId> "Strategy"`). If another peer is already exploring the task, coordinate or explore an alternative hypothesis.',
+    '4. Adversarial Scrutiny & Debate: Challenge flawed hypotheses or edge cases with concrete counter-examples and failing tests (`pi-messenger-swarm challenge <taskId> "Counter-example / failing test"`).',
+    '5. Objective Machine Verification: Never rely on verbal assertions or peer praise. Validate all work with compilers (`tsc`), linters, and tests (`vitest`). A task is only complete when verified by automated checks (exit code 0).',
+    '6. Ephemeral Focus & Clean Turn Completion: Once your milestone is verified, record the evidence and artifacts in the task record (`pi-messenger-swarm task done <taskId> "Evidence & summary"`), release held resources, and cleanly complete your turn. Do not spin or idle; next-generation peers will continue from the blackboard state.',
   ].join('\n');
 }
 
 function buildSystemPrompt(request: SpawnRequest): string {
-  const role = formatRoleLabel(request.role ?? 'Subagent');
+  const role = formatRoleLabel(request.role ?? 'Peer');
   const persona = request.persona?.trim();
   const objective = (request.objective ?? request.message ?? '').trim();
 
   const lines: string[] = [
-    '# Swarm Subagent Role',
+    '# Swarm Peer Agent Role',
     '',
     '## Role Description',
-    `You are a specialized ${role} operating as an autonomous subagent inside a collaborative swarm.`,
+    `You are a specialized ${role} operating as an autonomous peer agent inside a collaborative swarm.`,
   ];
 
   if (persona) {
@@ -225,13 +224,13 @@ function buildPrompt(request: SpawnRequest): string {
       '## Task Execution Procedure',
       'Follow this sequence when executing an assigned task:',
       '',
-      '1. Claim the task before starting:',
+      '1. Claim the task or propose strategy before starting:',
       `   pi-messenger-swarm task claim ${request.taskId}`,
-      '   If the claim fails, report the conflict and await instruction. Do not proceed with unclaimed work.',
+      '   If the claim fails, coordinate with peers or explore an alternative hypothesis.',
       '',
-      '2. Update progress at regular intervals:',
+      '2. Update progress upon reaching verifiable milestones:',
       `   pi-messenger-swarm task progress ${request.taskId} "Specific milestone achieved"`,
-      '   Send updates every 3-5 tool calls or upon completing significant milestones. Include what was done and why.',
+      '   Include what was verified and objective machine evidence.',
       '',
       '3. Mark the task done upon completion:',
       `   pi-messenger-swarm task done ${request.taskId} "Concrete accomplishment with evidence"`,
@@ -242,14 +241,14 @@ function buildPrompt(request: SpawnRequest): string {
   lines.push(
     '',
     '## Definition of Done',
-    '- Objective addressed with concrete output.',
+    '- Objective addressed with concrete, machine-verifiable output.',
     request.taskId
-      ? '- Progress updates recorded via pi-messenger-swarm at appropriate intervals.'
+      ? '- Progress updates recorded via pi-messenger-swarm upon reaching significant milestones.'
       : '',
-    request.taskId ? '- Task marked done via pi-messenger-swarm before exit.' : '',
-    '- All findings and evidence recorded in task progress/done (the coordinator reads output via `pi-messenger-swarm task show`, not your response text).',
-    '- Any file reservations released before exit.',
-    '- EXIT IMMEDIATELY after task.done: bash({ command: "exit 0" }). Do not idle or monitor after completion.'
+    request.taskId ? '- Task marked done via pi-messenger-swarm with objective evidence.' : '',
+    '- All findings and artifacts recorded in task progress/done for peer inspection via `pi-messenger-swarm task show`.',
+    '- Any resource reservations released before concluding your turn.',
+    '- Turn concluded cleanly after task completion; do not loop or idle.'
   );
 
   return lines.join('\n');
@@ -371,6 +370,7 @@ function attachHandlers(
 
   proc.on('error', (err) => {
     cleanupTmpDir(promptTmpDir);
+    removeWorktree(state.cwd, state.id);
     const runtime = runtimes.get(state.id);
     if (!runtime) return;
 
@@ -398,6 +398,7 @@ function attachHandlers(
 
   proc.on('close', (code, signal) => {
     cleanupTmpDir(promptTmpDir);
+    removeWorktree(state.cwd, state.id);
     removeLiveWorker(state.cwd, state.request.taskId || spawnLiveKey(state.id));
 
     const runtime = runtimes.get(state.id);
@@ -482,6 +483,10 @@ export function spawnSubagent(
     objective = request.objective || request.message || '';
   }
 
+  // Allocate dedicated worktree sandbox
+  const worktree = createWorktree(cwd, id, name);
+  const effectiveCwd = worktree.worktreePath;
+
   const record: SpawnedAgent = {
     id,
     cwd,
@@ -495,6 +500,9 @@ export function spawnSubagent(
     status: 'running',
     startedAt,
     sessionId,
+    worktreePath: worktree.worktreePath,
+    port: worktree.port,
+    testPort: worktree.testPort,
   };
   record.systemPrompt = systemPrompt;
 
@@ -509,9 +517,12 @@ export function spawnSubagent(
 
   const env = {
     ...process.env,
-    PI_SWARM_SPAWNED: '1',
     PI_AGENT_NAME: name,
     ...(inheritedChannel ? { PI_MESSENGER_CHANNEL: inheritedChannel } : {}),
+    TMPDIR: worktree.tmpDir,
+    PORT: String(worktree.port),
+    TEST_PORT: String(worktree.testPort),
+    PI_WORKTREE_PATH: worktree.worktreePath,
   };
 
   const spawnState: SpawnState = {
@@ -532,9 +543,10 @@ export function spawnSubagent(
   const promptTmpDir = (args as any)._promptTmpDir as string | null;
 
   const proc = spawn('pi', args, {
-    cwd,
+    cwd: effectiveCwd,
     stdio: ['ignore', 'pipe', 'pipe'],
     env,
+    detached: process.platform !== 'win32',
   });
 
   record.pid = proc.pid;
@@ -590,6 +602,41 @@ export function findSpawnedAgentByName(
   return allAgents.find((a) => a.name === name) ?? null;
 }
 
+function killProcessGroup(
+  proc: ChildProcess,
+  pid?: number,
+  signal: NodeJS.Signals = 'SIGTERM'
+): void {
+  try {
+    proc.kill(signal);
+  } catch {
+    /* already dead or mock */
+  }
+  if (pid && typeof pid === 'number' && pid > 0 && process.platform !== 'win32') {
+    try {
+      process.kill(-pid, signal);
+    } catch {
+      /* already dead or no process group */
+    }
+  }
+}
+
+function killPidGroup(pid: number, signal: NodeJS.Signals = 'SIGTERM'): void {
+  if (process.platform !== 'win32') {
+    try {
+      process.kill(-pid, signal);
+      return;
+    } catch {
+      /* fallback to direct pid */
+    }
+  }
+  try {
+    process.kill(pid, signal);
+  } catch {
+    /* already dead */
+  }
+}
+
 export function stopSpawn(cwd: string, id: string): boolean {
   const runtime = runtimes.get(id);
   if (!runtime) return false;
@@ -598,14 +645,11 @@ export function stopSpawn(cwd: string, id: string): boolean {
   if (runtime.detached) {
     if (runtime.record.pid && isProcessAlive(runtime.record.pid)) {
       runtime.stopping = true;
-      try {
-        process.kill(runtime.record.pid, 'SIGTERM');
-      } catch {
-        /* already dead */
-      }
+      killPidGroup(runtime.record.pid, 'SIGTERM');
+      const pid = runtime.record.pid;
       setTimeout(() => {
         try {
-          if (isProcessAlive(runtime.record.pid!)) process.kill(runtime.record.pid!, 'SIGKILL');
+          if (isProcessAlive(pid)) killPidGroup(pid, 'SIGKILL');
         } catch {
           /* already dead */
         }
@@ -617,10 +661,10 @@ export function stopSpawn(cwd: string, id: string): boolean {
   if (runtime.process.exitCode !== null) return false;
 
   runtime.stopping = true;
-  runtime.process.kill('SIGTERM');
+  killProcessGroup(runtime.process, runtime.record.pid, 'SIGTERM');
   setTimeout(() => {
     if (runtime.process.exitCode === null) {
-      runtime.process.kill('SIGKILL');
+      killProcessGroup(runtime.process, runtime.record.pid, 'SIGKILL');
     }
   }, 4000).unref();
 
@@ -633,15 +677,11 @@ export function stopAllSpawned(cwd?: string): void {
     if (runtime.detached) {
       if (runtime.record.pid && isProcessAlive(runtime.record.pid)) {
         runtime.stopping = true;
-        try {
-          process.kill(runtime.record.pid, 'SIGTERM');
-        } catch {
-          /* already dead */
-        }
+        killPidGroup(runtime.record.pid, 'SIGTERM');
         const pid = runtime.record.pid;
         setTimeout(() => {
           try {
-            if (isProcessAlive(pid)) process.kill(pid, 'SIGKILL');
+            if (isProcessAlive(pid)) killPidGroup(pid, 'SIGKILL');
           } catch {
             /* already dead */
           }
@@ -651,12 +691,12 @@ export function stopAllSpawned(cwd?: string): void {
     }
     if (runtime.process.exitCode !== null) continue;
     runtime.stopping = true;
-    runtime.process.kill('SIGTERM');
+    killProcessGroup(runtime.process, runtime.record.pid, 'SIGTERM');
     setTimeout(() => {
       const live = runtimes.get(id);
       if (!live) return;
       if (live.process.exitCode === null) {
-        live.process.kill('SIGKILL');
+        killProcessGroup(live.process, live.record.pid, 'SIGKILL');
       }
     }, 4000).unref();
   }
@@ -667,20 +707,12 @@ export function forceKillAllSpawned(cwd?: string): void {
     if (cwd && runtime.record.cwd !== cwd) continue;
     if (runtime.detached) {
       if (runtime.record.pid && isProcessAlive(runtime.record.pid)) {
-        try {
-          process.kill(runtime.record.pid, 'SIGKILL');
-        } catch {
-          /* already dead */
-        }
+        killPidGroup(runtime.record.pid, 'SIGKILL');
       }
       continue;
     }
     if (runtime.process.exitCode !== null) continue;
-    try {
-      runtime.process.kill('SIGKILL');
-    } catch {
-      // Already dead
-    }
+    killProcessGroup(runtime.process, runtime.record.pid, 'SIGKILL');
   }
 }
 
@@ -742,6 +774,7 @@ function isProcessAlive(pid: number): boolean {
 }
 
 export function reconcileSpawnedAgents(cwd: string, sessionId: string): number {
+  pruneWorktrees(cwd);
   const persisted = loadSpawnedAgents(cwd, sessionId);
   let reconciled = 0;
 
@@ -752,6 +785,7 @@ export function reconcileSpawnedAgents(cwd: string, sessionId: string): number {
     // This covers harness crash-restart: agent process already exited but the
     // close handler never fired because runtimes was lost.
     if (agent.pid && !isProcessAlive(agent.pid)) {
+      removeWorktree(cwd, agent.id);
       appendEvent(cwd, sessionId, {
         id: agent.id,
         type: 'failed',

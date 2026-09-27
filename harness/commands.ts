@@ -146,6 +146,7 @@ export const COMMAND_REGISTRY: CommandSpec[] = [
     action: 'task.done',
     description: 'Mark task as done',
     args: ['id', 'summary+'],
+    flags: ['verify'],
   },
   {
     cmd: 'task block',
@@ -171,6 +172,47 @@ export const COMMAND_REGISTRY: CommandSpec[] = [
     cmd: 'task archive-done',
     action: 'task.archive_done',
     description: 'Archive completed tasks',
+  },
+  {
+    cmd: 'task propose',
+    action: 'task.propose',
+    description: 'Propose a strategy or hypothesis for a task',
+    args: ['id', 'content+'],
+  },
+  {
+    cmd: 'task challenge',
+    action: 'task.challenge',
+    description: 'Challenge a task proposal or claim with counter-example',
+    args: ['id', 'reason+'],
+  },
+  {
+    cmd: 'task blackboard',
+    action: 'task.blackboard',
+    description: 'Display four-zone blackboard projection',
+  },
+  {
+    cmd: 'blackboard',
+    action: 'blackboard',
+    description: 'Display four-zone blackboard projection',
+  },
+  {
+    cmd: 'done',
+    action: 'done',
+    description: 'Mark task as done',
+    args: ['id', 'summary+'],
+    flags: ['verify'],
+  },
+  {
+    cmd: 'propose',
+    action: 'propose',
+    description: 'Propose a strategy or hypothesis for a task',
+    args: ['id', 'content+'],
+  },
+  {
+    cmd: 'challenge',
+    action: 'challenge',
+    description: 'Challenge a task proposal or claim with counter-example',
+    args: ['id', 'reason+'],
   },
 
   // ── Spawn ─────────────────────────────────────────────────────────────────

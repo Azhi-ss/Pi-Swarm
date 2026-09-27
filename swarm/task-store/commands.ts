@@ -2,13 +2,20 @@ import type { SwarmTask, SwarmTaskCreateInput, SwarmTaskEvidence } from '../type
 import type {
   CreatedPayload,
   ClaimedPayload,
+  StakedPayload,
+  RenewedPayload,
   ProgressPayload,
   CompletedPayload,
+  VerifiedPayload,
+  VerificationFailedPayload,
+  DeadEndPayload,
   BlockedPayload,
+  ProposedPayload,
+  ChallengedPayload,
 } from './types.js';
 import { appendTaskEvent, replayAllTasks } from './events.js';
 import { taskSpecPath, writeTaskSpec, deleteTaskSpec } from './persistence.js';
-import { getTasks, getAllTasks, getTask, taskExists } from './queries.js';
+import { getTasks, getAllTasks, getTask, taskExists, isLeaseExpired } from './queries.js';
 import { normalizeChannelId } from '../../channel.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -44,6 +51,7 @@ export function createTask(
       content: input.content,
       dependsOn: input.dependsOn,
       createdBy: input.createdBy,
+      verifyCommand: input.verifyCommand,
     } as CreatedPayload,
   });
 
@@ -62,15 +70,33 @@ export function claimTask(
   agentName: string,
   reason?: string
 ): SwarmTask | null {
-  const task = getTask(cwd, sessionId, taskId);
+  let task = getTask(cwd, sessionId, taskId);
   if (!task) return null;
-  if (task.status !== 'todo') return null;
 
-  // Check dependencies
+  // Check dependencies: must be satisfied by 'done' or 'verified'
   const allTasks = getTasks(cwd, sessionId);
-  const doneIds = new Set(allTasks.filter((t) => t.status === 'done').map((t) => t.id));
+  const doneIds = new Set(
+    allTasks.filter((t) => t.status === 'done' || t.status === 'verified').map((t) => t.id)
+  );
   const unmetDeps = task.depends_on.filter((dep) => !doneIds.has(dep));
   if (unmetDeps.length > 0) return null;
+
+  // If claimed/staked, check if lease is expired for opportunistic preemption
+  if (task.status === 'in_progress' || task.status === 'staked') {
+    if (isLeaseExpired(task)) {
+      appendTaskEvent(cwd, sessionId, {
+        taskId,
+        type: 'released',
+        timestamp: new Date().toISOString(),
+        agent: task.claimed_by,
+      });
+      task = getTask(cwd, sessionId, taskId);
+    } else {
+      return null;
+    }
+  }
+
+  if (!task || task.status !== 'todo') return null;
 
   // Append claim event
   appendTaskEvent(cwd, sessionId, {
@@ -84,6 +110,79 @@ export function claimTask(
   return getTask(cwd, sessionId, taskId);
 }
 
+export function stakeTask(
+  cwd: string,
+  sessionId: string,
+  taskId: string,
+  agentName: string,
+  options?: { ttl?: number; proposalId?: string; reason?: string }
+): SwarmTask | null {
+  let task = getTask(cwd, sessionId, taskId);
+  if (!task) return null;
+
+  // Check dependencies: must be satisfied by 'done' or 'verified'
+  const allTasks = getTasks(cwd, sessionId);
+  const doneIds = new Set(
+    allTasks.filter((t) => t.status === 'done' || t.status === 'verified').map((t) => t.id)
+  );
+  const unmetDeps = task.depends_on.filter((dep) => !doneIds.has(dep));
+  if (unmetDeps.length > 0) return null;
+
+  // If already claimed/staked, check if lease is expired for opportunistic preemption
+  if (task.status === 'staked' || task.status === 'in_progress') {
+    if (isLeaseExpired(task)) {
+      appendTaskEvent(cwd, sessionId, {
+        taskId,
+        type: 'released',
+        timestamp: new Date().toISOString(),
+        agent: task.claimed_by,
+      });
+      task = getTask(cwd, sessionId, taskId);
+    } else {
+      return null;
+    }
+  }
+
+  if (!task || (task.status !== 'todo' && task.status !== 'staked')) return null;
+
+  appendTaskEvent(cwd, sessionId, {
+    taskId,
+    type: 'staked',
+    timestamp: new Date().toISOString(),
+    agent: agentName,
+    payload: {
+      ttl: options?.ttl ?? 300,
+      proposalId: options?.proposalId,
+      reason: options?.reason,
+    } as StakedPayload,
+  });
+
+  return getTask(cwd, sessionId, taskId);
+}
+
+export function renewTaskLease(
+  cwd: string,
+  sessionId: string,
+  taskId: string,
+  agentName: string,
+  ttl?: number
+): SwarmTask | null {
+  const task = getTask(cwd, sessionId, taskId);
+  if (!task) return null;
+  if (task.status !== 'staked' && task.status !== 'in_progress') return null;
+  if (task.claimed_by !== agentName) return null;
+
+  appendTaskEvent(cwd, sessionId, {
+    taskId,
+    type: 'renewed',
+    timestamp: new Date().toISOString(),
+    agent: agentName,
+    payload: { ttl } as RenewedPayload,
+  });
+
+  return getTask(cwd, sessionId, taskId);
+}
+
 export function unclaimTask(
   cwd: string,
   sessionId: string,
@@ -92,7 +191,7 @@ export function unclaimTask(
 ): SwarmTask | null {
   const task = getTask(cwd, sessionId, taskId);
   if (!task) return null;
-  if (task.status !== 'in_progress') return null;
+  if (task.status !== 'in_progress' && task.status !== 'staked') return null;
   if (task.claimed_by !== agentName) return null;
 
   // Append release event
@@ -150,7 +249,7 @@ export function completeTask(
 ): SwarmTask | null {
   const task = getTask(cwd, sessionId, taskId);
   if (!task) return null;
-  if (task.status !== 'in_progress') return null;
+  if (task.status !== 'in_progress' && task.status !== 'staked') return null;
   if (task.claimed_by !== agentName) return null;
 
   appendTaskEvent(cwd, sessionId, {
@@ -159,6 +258,71 @@ export function completeTask(
     timestamp: new Date().toISOString(),
     agent: agentName,
     payload: { summary, evidence } as CompletedPayload,
+  });
+
+  return getTask(cwd, sessionId, taskId);
+}
+
+export function verifyTask(
+  cwd: string,
+  sessionId: string,
+  taskId: string,
+  agentName: string,
+  payload: VerifiedPayload
+): SwarmTask | null {
+  const task = getTask(cwd, sessionId, taskId);
+  if (!task) return null;
+  if (task.status !== 'in_progress' && task.status !== 'staked') return null;
+  if (task.claimed_by !== agentName) return null;
+
+  appendTaskEvent(cwd, sessionId, {
+    taskId,
+    type: 'verified',
+    timestamp: new Date().toISOString(),
+    agent: agentName,
+    payload,
+  });
+
+  return getTask(cwd, sessionId, taskId);
+}
+
+export function recordVerificationFailed(
+  cwd: string,
+  sessionId: string,
+  taskId: string,
+  agentName: string,
+  payload: VerificationFailedPayload
+): SwarmTask | null {
+  const task = getTask(cwd, sessionId, taskId);
+  if (!task) return null;
+
+  appendTaskEvent(cwd, sessionId, {
+    taskId,
+    type: 'verification_failed',
+    timestamp: new Date().toISOString(),
+    agent: agentName,
+    payload,
+  });
+
+  return getTask(cwd, sessionId, taskId);
+}
+
+export function deadEndTask(
+  cwd: string,
+  sessionId: string,
+  taskId: string,
+  agentName: string,
+  payload: DeadEndPayload
+): SwarmTask | null {
+  const task = getTask(cwd, sessionId, taskId);
+  if (!task) return null;
+
+  appendTaskEvent(cwd, sessionId, {
+    taskId,
+    type: 'dead_end',
+    timestamp: new Date().toISOString(),
+    agent: agentName,
+    payload,
   });
 
   return getTask(cwd, sessionId, taskId);
@@ -184,7 +348,9 @@ export function resetTask(
 
   if (cascade) {
     const allTasks = getAllTasks(cwd, sessionId);
-    const doneIds = new Set(allTasks.filter((t) => t.status === 'done').map((t) => t.id));
+    const doneIds = new Set(
+      allTasks.filter((t) => t.status === 'done' || t.status === 'verified').map((t) => t.id)
+    );
 
     // Find all tasks that depend on this one (directly or transitively)
     const toReset = new Set<string>();
@@ -227,7 +393,9 @@ export function archiveTask(cwd: string, sessionId: string, taskId: string): Swa
 }
 
 export function archiveDoneTasks(cwd: string, sessionId: string): number {
-  const doneTasks = getTasks(cwd, sessionId).filter((t) => t.status === 'done');
+  const doneTasks = getTasks(cwd, sessionId).filter(
+    (t) => t.status === 'done' || t.status === 'verified'
+  );
   for (const task of doneTasks) {
     archiveTask(cwd, sessionId, task.id);
   }
@@ -261,4 +429,51 @@ export function appendTaskProgress(
     agent: agentName,
     payload: { message } as ProgressPayload,
   });
+}
+
+export function proposeTask(
+  cwd: string,
+  sessionId: string,
+  taskId: string,
+  agentName: string,
+  proposal: string
+): SwarmTask | null {
+  const task = getTask(cwd, sessionId, taskId);
+  if (!task) return null;
+
+  appendTaskEvent(cwd, sessionId, {
+    taskId,
+    type: 'proposed',
+    timestamp: new Date().toISOString(),
+    agent: agentName,
+    payload: { proposal, author: agentName } as ProposedPayload,
+  });
+
+  return getTask(cwd, sessionId, taskId);
+}
+
+export function challengeTask(
+  cwd: string,
+  sessionId: string,
+  taskId: string,
+  agentName: string,
+  objection: string,
+  targetClaimant?: string
+): SwarmTask | null {
+  const task = getTask(cwd, sessionId, taskId);
+  if (!task) return null;
+
+  appendTaskEvent(cwd, sessionId, {
+    taskId,
+    type: 'challenged',
+    timestamp: new Date().toISOString(),
+    agent: agentName,
+    payload: {
+      objection,
+      challenger: agentName,
+      targetClaimant: targetClaimant ?? task.claimed_by,
+    } as ChallengedPayload,
+  });
+
+  return getTask(cwd, sessionId, taskId);
 }

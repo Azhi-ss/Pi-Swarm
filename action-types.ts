@@ -19,6 +19,8 @@ export interface MessengerActionParams {
   summary?: string;
   evidence?: TaskEvidence;
   cascade?: boolean;
+  verify?: string;
+  ttl?: number;
 
   // Generic text payloads
   prompt?: string;

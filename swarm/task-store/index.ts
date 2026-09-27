@@ -4,9 +4,16 @@ export type {
   TaskEventType,
   CreatedPayload,
   ClaimedPayload,
+  StakedPayload,
+  RenewedPayload,
   ProgressPayload,
   CompletedPayload,
+  VerifiedPayload,
+  VerificationFailedPayload,
+  DeadEndPayload,
   BlockedPayload,
+  ProposedPayload,
+  ChallengedPayload,
 } from './types.js';
 export { appendTaskEvent, replayEventsToMap, replayTasks, replayAllTasks } from './events.js';
 export { getTasksJsonlPath, getTaskSpecsDir, taskSpecPath } from './persistence.js';
@@ -19,6 +26,11 @@ export {
   getSummaryForTasks,
   getReadyTasks,
   getReadyTasksForTasks,
+  getGoalTasks,
+  getStakedTasks,
+  getVerifiedTasks,
+  getGraveyardTasks,
+  isLeaseExpired,
   getStalledTasks,
   getTaskSpec,
   getTaskProgress,
@@ -27,14 +39,22 @@ export {
 export {
   createTask,
   claimTask,
+  stakeTask,
+  renewTaskLease,
   unclaimTask,
   blockTask,
   unblockTask,
   completeTask,
+  verifyTask,
+  recordVerificationFailed,
+  deadEndTask,
   resetTask,
   archiveTask,
   archiveDoneTasks,
   deleteTask,
   appendTaskProgress,
+  proposeTask,
+  challengeTask,
 } from './commands.js';
 export { cleanupStaleTaskClaims } from './cleanup.js';
+export { generateBlackboard, writeBlackboard } from './blackboard.js';

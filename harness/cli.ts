@@ -381,6 +381,10 @@ async function postAction(jsonBody: string): Promise<void> {
     try {
       const parsed = JSON.parse(body);
       if (parsed.ok && parsed.result?.text) {
+        if (parsed.result.details?.error === 'verification_failed') {
+          process.stderr.write(parsed.result.text + '\n');
+          process.exit(1);
+        }
         process.stdout.write(parsed.result.text + '\n');
       } else if (!parsed.ok) {
         process.stderr.write(`Error: ${parsed.error}\n`);
@@ -481,6 +485,10 @@ Usage:
   pi-messenger-swarm task unblock <id>
   pi-messenger-swarm task reset <id> [--cascade]
   pi-messenger-swarm task archive-done
+  pi-messenger-swarm task propose <id> <content>
+  pi-messenger-swarm task challenge <id> <reason>
+  pi-messenger-swarm propose <id> <content>
+  pi-messenger-swarm challenge <id> <reason>
 
   pi-messenger-swarm spawn --role Researcher "Analyze X" --task-id <id> [--persona "..."] [--name <name>] [--agent-file <path>] [--objective "..."] [--context "..."] [--message-file <path>] [--force]
   pi-messenger-swarm spawn list
@@ -704,6 +712,45 @@ Environment:
       break;
     }
 
+    case 'propose': {
+      const taskId = args[0];
+      const content = args.slice(1).join(' ');
+      if (!taskId || !content) {
+        process.stderr.write('Error: propose requires <taskId> <content>.\n');
+        process.exit(1);
+      }
+      await postAction(buildAction({ action: 'propose', taskId, content }));
+      break;
+    }
+
+    case 'challenge': {
+      const taskId = args[0];
+      const reason = args.slice(1).join(' ');
+      if (!taskId || !reason) {
+        process.stderr.write('Error: challenge requires <taskId> <reason>.\n');
+        process.exit(1);
+      }
+      await postAction(buildAction({ action: 'challenge', taskId, reason }));
+      break;
+    }
+
+    case 'done': {
+      const verify = extractFlag(args, 'verify');
+      const id = args[0];
+      const summary = args.slice(1).join(' ');
+      if (!id || !summary) {
+        process.stderr.write('Error: done requires <id> <summary>.\n');
+        process.exit(1);
+      }
+      await postAction(buildAction({ action: 'done', id, summary, verify }));
+      break;
+    }
+
+    case 'blackboard': {
+      await postAction(buildAction({ action: 'blackboard' }));
+      break;
+    }
+
     // ---- Tasks ----
     case 'task': {
       const sub = args.shift();
@@ -772,13 +819,14 @@ Environment:
           break;
         }
         case 'done': {
+          const verify = extractFlag(args, 'verify');
           const id = args[0];
           const summary = args.slice(1).join(' ');
           if (!id || !summary) {
             process.stderr.write('Error: task done requires <id> <summary>.\n');
             process.exit(1);
           }
-          await postAction(buildAction({ action: 'task.done', id, summary }));
+          await postAction(buildAction({ action: 'task.done', id, summary, verify }));
           break;
         }
         case 'block': {
@@ -816,13 +864,37 @@ Environment:
           await postAction(buildAction({ action: 'task.archive_done' }));
           break;
         }
+        case 'propose': {
+          const id = args[0];
+          const content = args.slice(1).join(' ');
+          if (!id || !content) {
+            process.stderr.write('Error: task propose requires <id> <content>.\n');
+            process.exit(1);
+          }
+          await postAction(buildAction({ action: 'task.propose', id, content }));
+          break;
+        }
+        case 'challenge': {
+          const id = args[0];
+          const reason = args.slice(1).join(' ');
+          if (!id || !reason) {
+            process.stderr.write('Error: task challenge requires <id> <reason>.\n');
+            process.exit(1);
+          }
+          await postAction(buildAction({ action: 'task.challenge', id, reason }));
+          break;
+        }
+        case 'blackboard': {
+          await postAction(buildAction({ action: 'task.blackboard' }));
+          break;
+        }
         default: {
           if (sub === undefined) {
             process.stderr.write(
               'Usage: pi-messenger-swarm task <subcommand>\n' +
                 '  list | ready | show <id> | create | claim <id> | unclaim <id>\n' +
                 '  progress <id> <msg> | done <id> <summary> | block <id> | unblock <id>\n' +
-                '  reset <id> [--cascade] | archive-done\n'
+                '  reset <id> [--cascade] | archive-done | propose <id> <content> | challenge <id> <reason>\n'
             );
           } else {
             process.stderr.write(`Unknown task subcommand: ${sub}\n`);

@@ -110,9 +110,6 @@ export function createHarnessServer(messengerDir: string): HarnessServerControll
 
   function start(): void {
     if (harnessProcess) return;
-    // Spawned subagents reuse their parent's harness server —
-    // the CLI forwards agent identity headers on every request.
-    if (process.env.PI_SWARM_SPAWNED === '1') return;
 
     const { PI_MESSENGER_CHANNEL, ...restEnv } = process.env as Record<string, string | undefined>;
 

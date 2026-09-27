@@ -41,8 +41,30 @@ export function cleanupStaleTaskClaims(cwd: string, sessionId: string): number {
         .map((f) => f.slice(0, -5))
     : [];
 
+  const now = Date.now();
+
   for (const task of tasks) {
-    if (task.status !== 'in_progress' || !task.claimed_by) continue;
+    if ((task.status !== 'in_progress' && task.status !== 'staked') || !task.claimed_by) continue;
+
+    // Check TTL lease expiration
+    if (task.lease_expires_at && now >= Date.parse(task.lease_expires_at)) {
+      appendTaskEvent(cwd, sessionId, {
+        taskId: task.id,
+        type: 'released',
+        timestamp: new Date().toISOString(),
+        agent: task.claimed_by,
+      });
+      logFeedEvent(
+        cwd,
+        task.claimed_by,
+        'task.reset',
+        task.id,
+        'lease expired - task auto-released',
+        task.channel ?? 'unknown'
+      );
+      cleaned++;
+      continue;
+    }
 
     const active = isAgentActive(cwd, task.claimed_by);
     if (active === false) {

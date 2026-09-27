@@ -1,337 +1,195 @@
-<div align="center">
+# 🐝 Pi-Swarm
 
-<p>
-  <img src="https://raw.githubusercontent.com/monotykamary/pi-messenger-swarm/main/banner.png" alt="pi-messenger-swarm" width="1100">
-</p>
+> **去中心化、扁平平权、以客观机器裁判为闭环的自组织多智能体蜂群系统**  
+> _A decentralized, self-organizing multi-agent swarm architecture built for [pi](https://github.com/earendil-works/pi-coding-agent)._
 
-# Pi Messenger (Swarm Mode)
-
-**File-based multi-agent coordination for [pi](https://github.com/earendil-works/pi-coding-agent)**
-
-_Join a mesh, share channels, spawn subagents — no daemon required._
-
-</div>
-
-[![npm version](https://img.shields.io/npm/v/pi-messenger-swarm?style=for-the-badge)](https://www.npmjs.com/package/pi-messenger-swarm)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
+[![Vitest](https://img.shields.io/badge/Tests-435%2F435%20Passing-brightgreen?style=flat-square)](tests/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-Strict%200%20Errors-blue?style=flat-square)](tsconfig.json)
 
 ---
 
-## Screenshots
+## 一、 思想渊源与诞生背景
 
-| Swarm Details                              | Swarm Messenger                                |
-| ------------------------------------------ | ---------------------------------------------- |
-| ![Swarm Details](assets/swarm_details.jpg) | ![Swarm Messenger](assets/swarm_messenger.jpg) |
-| Memory Channel                             | Session Channel                                |
-| ![Memory Channel](assets/memory.jpg)       | ![Session Channel](assets/session.jpg)         |
+**Pi-Swarm** 的前身是针对本地轻量级 Coding Agent 工具 Pi 的扩展插件 `pi-messenger-swarm`。早期的多智能体插件主要解决基础的文件消息传递与单机进程管理，但在面对高并发、复杂逻辑研发时，往往陷入两个传统 Multi-Agent 架构的死胡同：
 
-## Install
+1. **中心化协调官（Orchestrator）的单点拥堵与智商瓶颈**：随着派生 Agent 增多，中心节点的上下文极速膨胀，不仅消耗大量 Token，还极易在微观调度中给出错误指令；
+2. **自然语言“虚假自证”与同质化踩坑**：多智能体之间用自然语言互相吹捧确认完成，缺少真实代码检验；一个 Agent 踩了死胡同，其他 Agent 毫无感知，在相同错误路径上反复耗费算力。
 
-From npm:
+为了彻底突破这两大困境，**Pi-Swarm** 深度借鉴并融合了近期 AI 领域两场极具颠覆性的前沿访谈与实践：
+
+### 1. OpenAI Noam Brown：测试期算力与万级 Agent 涌现哲学
+
+- **消灭中心化指挥官 (No Central Orchestrator)**：抛弃“主宰-工人 (Master-Slave)”结构，建立完全平等的扁平对等网格（Flat Peer Mesh）。真正的群体智能是在对等交互中自组织涌现的，而非由单一节点精密计划出来的。
+- **极简脚手架 (Minimal Scaffolding)**：废黜死板繁琐的微观管束军规，提供最轻量的协作原语（黑板查阅、自主认领、客观质疑），释放前沿模型的自主推理与辩论潜能。
+- **客观机器裁判 (Ground Truth Verifier)**：**真理的唯一标准是客观机器执行结果，而非模型的自我感觉。** 退出码 Exit Code 0 是完成的唯一通行证，坚决杜绝自然语言虚假确认。
+
+### 2. Anthropic Claude 超级蜂群：生物酶体系发现 (~950 Agents 并行攻坚)
+
+- **假说软认领 (Soft Staking)**：面对复杂任务空间，Agent 并发提出探索路径，通过轻量级 TTL 租约（Lease）进行声明式认领，支持超时无锁抢占与心跳保活。
+- **真实沙箱客观筛选 (Sandbox Screening)**：每个假说必须在绝对隔离的物理沙箱中运行并接受真实测试检验，优胜劣汰。
+- **负向知识沉淀与全群快速剪枝 (Fast Pruning)**：被证伪的假说与报错堆栈即时沉淀至避坑区（Graveyard），并向全局信道广播剪枝信号，瞬间阻断全蜂群在死胡同上的无效算力消耗。
+
+---
+
+## 二、 核心架构与逻辑思想推演
+
+Pi-Swarm 的整体设计并非零散功能的拼凑，而是一套**严密互扣、由浅入深的闭环逻辑推演系统**：
+
+```
+                    人类开发者 (Terminal TUI 看板)
+                               │
+                               ▼ 提出需求 / 物理紧急刹车 (SIG_ABORT)
+               ┌─────────────────────────────────────────┐
+               │ 1. 主 Coding Agent (委托者 & 只读观察者) │
+               └────────────────────┬────────────────────┘
+                                    │ 发布目标规格，不插手微观执行
+                                    ▼
+       ┌────────────────────────────────────────────────────────┐
+       │ 2. 四区全局黑板 (Four-Zone Blackboard CQRS)            │
+       │    [🎯 Goal 目标区] ──> [⚡ Soft Staking 软认领租约]    │
+       │    [🏆 Verified 黄金事实] <── [🪦 Graveyard 避坑区]     │
+       └────────────────────────────┬───────────────────────────┘
+                                    │ 自主抢占假说并下沉攻坚
+                                    ▼
+       ┌────────────────────────────────────────────────────────┐
+       │ 3. 专属 Worktree 物理隔离沙箱 (Git Detached Sandbox)   │
+       │    .swarm/workspaces/worker-<id>/                      │
+       │    ├── 游离 HEAD (git worktree --detach 零分支污染)     │
+       │    ├── 软链复用宿主 node_modules (免重复安装秒级就绪)   │
+       │    └── 运行时隔离 (专属 TMPDIR / 动态 TEST_PORT 槽位)   │
+       └────────────────────────────┬───────────────────────────┘
+                                    │ 任务完成发起客观检验 (task done)
+                                    ▼
+       ┌────────────────────────────────────────────────────────┐
+       │ 4. 客观真实验证器与自愈闭环 (Ground Truth Verifier)     │
+       │    ├── 物理执行测试门禁 (npm test / Vitest)             │
+       │    ├── [Pass] Exit 0: 捕获 diff 生成 .patch 晋升黄金事实│
+       │    ├── [Fail] Steer 报错堆栈回弹沙箱触发自愈重思        │
+       │    └── [Fail >= 3] Fast Pruning 剪枝广播并释放租约      │
+       └────────────────────────────┬───────────────────────────┘
+                                    │ 沙箱全量测试 100% 跑通
+                                    ▼
+               ┌─────────────────────────────────────────┐
+               │ 5. 受控直接合并 (Direct Verified Merge) │
+               │    胜出 Agent 拥有将验证补丁合入主工程的物理权限│
+               └─────────────────────────────────────────┘
+```
+
+### 1. 双层解耦拓扑：委托者不插手，工作者对等平权
+
+- **主 Coding Agent**：面向人类，扮演“委托者 (Delegator)”与“只读观察者 (Observer)”。人类输入需求后，主 Agent 负责拆解总目标规格贴上黑板，一键启动蜂群后退居幕后，只通过 TUI 监控实时动态，保留人类一键物理熔断键（`SIG_ABORT`）。
+- **蜂群 Peer 节点**：地位完全平等的无中心网格。所有节点拥有相同的黑板读写权限与沙箱执行能力，杜绝层级汇报与等待指令造成的上下文损耗。
+
+### 2. 四区全局黑板与 CQRS 读写分离
+
+高并发 Multi-Agent 协作最怕两件事：多进程争抢写锁导致文件损坏，以及海量日志把 Agent 的 Context 撑爆。Pi-Swarm 采用 CQRS 读写分离：
+
+- **写入端**：底层基于 append-only JSONL 事件流追加，无锁高吞吐；
+- **读取端**：自动将状态投影汇聚为单文件只读快照 `BLACKBOARD.md`，单次读取严格限制在 `<1000 tokens`。
+- **四区状态机流转**：
+  - **Zone 1: Goal 目标区**：沉淀全局规格与验收依赖；
+  - **Zone 2: Soft Staking 软认领区**：Agent 自主声明探索假说，享有 300 秒 TTL 租约与心跳保活；节点异常挂死或超时自动无锁释放供同行接力；
+  - **Zone 3: Verified Artifacts 黄金事实区**：仅收录通过机器客观测试的代码成果与不可变物理补丁（`.patch`）；
+  - **Zone 4: Graveyard 避坑区**：记录被机器证伪的方案、反例测试与错误堆栈。
+
+### 3. 专属 Worktree 物理沙箱：极速、隔离、零分支污染
+
+并发修改同一份代码是灾难的根源。Pi-Swarm 基于 Git Detached Worktree 构建了轻量沙箱：
+
+- **零分支污染 (`--detach`)**：使用 `git worktree add --detach .swarm/workspaces/worker-<id> HEAD`，直接检出游离 HEAD，不创建任何多余的临时分支，人类开发者的 `git branch` 保持绝对纯净；
+- **依赖秒级就绪**：在沙箱内自动创建指向宿主 `node_modules` 的符号链接，无需在每个沙箱重复执行包安装，极速就绪；
+- **运行时隔离**：动态分配端口槽位（`PORT=3100+slot`、`TEST_PORT=3200+slot`）与独立 `TMPDIR`，杜绝多 Agent 本地测试端口冲突（`EADDRINUSE`）；
+- **生命周期回收**：正常退出自动移除沙箱；系统启动自动执行 `git worktree prune` 清理异常残留。
+
+### 4. 客观真实验证器与自愈剪枝闭环
+
+- **门禁拦截**：在 `task.done` 接口设立强制门禁，执行客观测试命令（自动探测项目 `npm test` 或指定 `--verify`）；
+- **自愈反馈**：测试失败时，门禁驳回完成申请，并将终端真实 stderr/stdout 堆栈通过 Steer 通道毫秒级回弹打回 Agent，驱动其在沙箱内修正代码自愈；
+- **全蜂群快速剪枝 (Fast Pruning)**：单任务连续 3 次验证失败，判定该假说为死胡同，归档至 Graveyard 并向全网广播 `task.dead_end` 剪枝信号，瞬间叫停蜂群在类似死胡同上的无效算力。
+
+### 5. 受控直接合并权限 (Direct Verified Merge)
+
+蜂群不是只提建议的清谈馆。在专属沙箱内通过机器真实测试（Exit Code 0）的胜出 Agent，拥有明确、受控的物理权限，可直接将生成的验证补丁（`git apply <patch>`）合并至主代码库。主 Agent 唤醒后直接验收已经通过全部测试的最终成果。
+
+---
+
+## 三、 快速上手与常用 CLI
+
+### 1. 安装与构建
 
 ```bash
-pi install npm:pi-messenger-swarm
+# 克隆仓库
+git clone https://github.com/Azhi-ss/Pi-Swarm.git
+cd Pi-Swarm
+
+# 安装依赖与编译
+pnpm install
+pnpm run build
+
+# 运行全量自动化测试 (55 个测试套件，435 项测试)
+npx vitest run
 ```
 
-From git (Pi package settings):
-
-```json
-{
-  "packages": ["https://github.com/monotykamary/pi-messenger-swarm@main"]
-}
-```
-
-> Tip: after release tags are published, pin to a version tag instead of `main` (for example `@vX.Y.Z`).
-
-## Quick Start
-
-Join the messenger and start collaborating in your session channel:
+### 2. 核心 CLI 命令交互
 
 ```bash
-pi-messenger-swarm join
-pi-messenger-swarm send #memory "Investigating auth timeout in refresh flow"
-pi-messenger-swarm task create --title "Investigate auth timeout" --content "Repro + fix"
-pi-messenger-swarm task claim task-1
-pi-messenger-swarm task progress task-1 "Found race in refresh flow"
-pi-messenger-swarm task done task-1 "Fixed refresh lock + tests"
+# 1. 查阅四区全局黑板
+pi-messenger-swarm blackboard show
+
+# 2. 声明式软认领假说任务 (获得 300s TTL 租约)
+pi-messenger-swarm task stake task-1 "尝试使用双向链表重构缓存淘汰策略"
+
+# 3. 任务执行期间定期心跳续约
+pi-messenger-swarm task heartbeat task-1
+
+# 4. 提交完成申请 (触发客观验证器门禁，通过后生成 .patch 产物)
+pi-messenger-swarm task done task-1 "重构完成，全量单元测试与压力测试均跑通"
+
+# 5. 提出策略方案与针对性反驳辩论
+pi-messenger-swarm propose task-1 "建议引入跳表结构优化范围查询性能"
+pi-messenger-swarm challenge task-1 "该方案在并发写入场景下存在锁竞争，附带并发测试反例用例"
 ```
 
-Spawn a specialized subagent:
+---
 
-```bash
-pi-messenger-swarm spawn --role "Packaging Gap Analyst" --persona "Skeptical market researcher" "Find productization gaps in idea aggregation tools"
-```
-
-## Channel Model
-
-Pi Messenger is now **channel-first**.
-
-### Session channels
-
-Each Pi session gets a dedicated default channel, generated as a human-friendly phrase such as:
-
-- `#quiet-river`
-- `#wild-viper`
-- `#ember-owl`
-
-The same Pi `sessionId` restores the same session channel when reopened.
-
-### Named channels
-
-By default, a durable named channel is created:
-
-- `#memory` — cross-session knowledge, notes, decisions, and async handoff
-
-You can create additional named channels as needed.
-
-You can also create additional named channels explicitly with `join`.
-
-### Durable channel posting
-
-Channel messages are durable even when nobody is listening.
-
-Posting to a channel means:
-
-1. append to that channel's feed
-2. try live inbox delivery to agents currently joined to that channel
-
-That makes channels useful as async coordination logs for later agents to pick up.
-
-### Session switching and resume
-
-If Pi switches or resumes sessions inside the same live messenger instance, messenger rebinds to the resumed Pi session:
-
-- restores the correct session channel
-- drops stale old session-channel membership
-- restarts watchers on the correct inbox
-- keeps named channels like `#memory`
-
-## Core Actions
-
-### Coordination
-
-- `join`
-- `status`
-- `list`
-- `whois`
-- `feed`
-- `set_status`
-- `send`
-- `reserve`
-- `release`
-- `rename`
-
-### Swarm Board
-
-- `swarm` — summary of tasks + spawned agents
-
-### Task Lifecycle
-
-- `task.create`
-- `task.list`
-- `task.show`
-- `task.ready`
-- `task.stalled`
-- `task.claim` (alias: `task.start`)
-- `task.unclaim` (alias: `task.stop`)
-- `task.progress`
-- `task.done`
-- `task.block`
-- `task.unblock`
-- `task.reset` (`cascade: true` supported)
-- `task.delete`
-- `task.archive_done` (moves completed tasks to `.pi/messenger/archive/<channel>/...`)
-
-Compatibility aliases:
-
-- `claim` → `task.claim`
-- `unclaim` → `task.unclaim`
-- `complete` → `task.done`
-
-### Subagent Management
-
-- `spawn`
-- `spawn.list`
-- `spawn.stop`
-
-## Messaging Semantics
-
-`send` now always requires an explicit `to:` target.
-
-### Direct message an agent
-
-```bash
-pi-messenger-swarm send OtherAgent "Need your API shape before I commit"
-```
-
-### Post durably to a channel
-
-```bash
-pi-messenger-swarm send #memory "Claimed task-4, touching src/auth/session.ts"
-pi-messenger-swarm send #memory "Nightly sync complete"
-```
-
-### Switch channels explicitly
-
-```bash
-pi-messenger-swarm join --channel memory
-pi-messenger-swarm join --channel architecture --create
-```
-
-### Read a channel feed
-
-```bash
-pi-messenger-swarm feed --limit 20
-pi-messenger-swarm feed --channel memory --limit 20
-```
-
-### Notes
-
-- `to: "#channel"` is the canonical way to post to a channel
-- `send` without `to` is invalid
-- the old `broadcast` action is removed
-- for channel posts, prefer `to: "#channel"` over `channel: "..."`
-
-## Overlay
-
-Run `/messenger` to open the swarm overlay.
-
-Overlay includes:
-
-- live agent presence
-- swarm task list/detail
-- live feed for the current channel
-- DM/current-channel post input
-- channel switching
-
-### Input shortcuts
-
-| Prefix             | Example                        | Effect                                               |
-| ------------------ | ------------------------------ | ---------------------------------------------------- |
-| _(plain text)_     | `looking at auth flow`         | Post to current channel                              |
-| `#AgentName msg`   | `#alpha are you done?`         | Post to that agent's current channel (DM-equivalent) |
-| `#all msg`         | `#all everyone please sync up` | Broadcast to all active agents simultaneously        |
-| `#channelname msg` | `#memory token refresh fixed`  | Post to any named channel                            |
-| `##cmd [args]`     | `##task list`                  | Run a CLI command directly (no LLM turn)             |
-
-**Autocomplete** fires automatically as you type:
-
-- `#` + Tab → lists active agents (as `#agent-name`), `#all`, and named channels; the current agent's own channel is excluded (no point messaging yourself); also surfaces `##` on a bare `#` so you can discover CLI mode
-- `##` + Tab → lists top-level commands; add a space and Tab again for subcommands
-- Multi-word trailing args (summaries, progress notes) are joined automatically — no quoting needed
-
-> **Agent channel = agent name (kebab-cased).** Every joined agent is reachable via `#<name-kebabcased>`. Agent `CoralFox` → `#coral-fox`; agent `Alpha` → `#alpha`. Tab-autocomplete fills this in for you. The excluded "self" channel is derived from the agent's registered name, not the channel currently active — so `#memory` (or any other named channel the agent has joined) still appears in suggestions.
-
-Planning UI and worker +/- controls were removed in swarm mode.
-
-## Storage Layout
-
-By default, swarm state is **project-scoped** (isolated per project). All channel state uses a unified event-sourced JSONL format:
+## 四、 核心代码目录结构
 
 ```text
-.pi/messenger/
-├── channels/                    # Unified event-sourced channel files
-│   ├── memory.jsonl           # Line 1: metadata header, Line 2+: feed events
-│   └── quiet-river.jsonl
-├── tasks/                       # Per-session task storage
-│   ├── session-abc.jsonl      # Task event log (created, claimed, done, etc.)
-│   └── session-abc/           # Task specs directory
-│       ├── task-1.md
-│       └── task-1.progress.md
-├── agents/                      # Per-session spawned agent storage
-│   ├── session-abc.jsonl      # Agent event log (spawned, completed, failed, stopped)
-│   └── session-abc/           # Agent definition files
-│       └── AgentName-id.md
-├── registry/                    # Agent registrations (joined mesh agents)
-│   ├── AgentA.json
-│   └── AgentB.json
+Pi-Swarm/
+├── BLACKBOARD.md                # 四区全局黑板单文件 CQRS 只读快照 (<1000 tokens)
+├── AGENTS.md                    # 面向 AI 智能体的机读规范 (README for Agents)
+├── SWARM_ARCHITECTURE_SPEC.md   # 系统 7 大架构模块规格说明与推演白皮书
+├── swarm/
+│   ├── spawn.ts                 # 扁平 Peer 派生、进程组脱离与环境注入
+│   ├── types.ts                 # 四区任务状态机、事件流与核心数据契约
+│   ├── worktree/                # 专属 Detached Worktree 沙箱管理与端口池
+│   ├── verifier/                # 客观机器测试门禁与补丁 (.patch) 自动生成
+│   ├── task-store/              # append-only JSONL 事件流存储与黑板投影器
+│   └── handlers/                # task stake / done / propose / challenge 路由处理器
+├── feed/                        # 全局公共通信总线与剪枝广播流
+└── tests/swarm/                 # 435 项高密度对抗与集成测试套件
 ```
 
-### Unified Channel Format (Event-Sourced)
+---
 
-Each channel file at `channels/<channel>.jsonl` uses an append-only JSONL format:
+## 五、 工程质量与验证基准
 
-**Line 1** — Metadata header:
+Pi-Swarm 遵循严谨的测试驱动开发与法医级验证规范：
 
-```json
-{
-  "_meta": true,
-  "v": 1,
-  "id": "memory",
-  "type": "named",
-  "createdAt": "2026-04-04T22:00:00.000Z",
-  "description": "Cross-session knowledge and insights"
-}
-```
+- **全量测试套件**：`55` 个测试文件，`435` 项测试项 **100% 保持通过**；
+- **高密度对抗测试覆盖**：
+  - `adversarial-blackboard-staking.test.ts`：高并发 TTL 租约抢占与失效竞争压测；
+  - `adversarial-verifier-pruning.test.ts`：虚假完成拦截率、Steer 堆栈自愈与 Fast Pruning 剪枝广播；
+  - `adversarial-propose-challenge.test.ts`：反例用例驱动辩论与 HTTP 端到端生命周期；
+  - `worktree-sandbox.test.ts`：Git Detached Worktree 零分支污染、依赖软链与端口槽位隔离验证；
+- **TypeScript 严格模式**：`npx tsc --noEmit` 0 错误、0 警告。
 
-**Line 2+** — Append-only feed events:
+---
 
-```json
-{"ts":"2026-04-04T22:05:00.000Z","agent":"Alpha","type":"join"}
-{"ts":"2026-04-04T22:10:00.000Z","agent":"Alpha","type":"message","preview":"Investigating auth timeout"}
-{"ts":"2026-04-04T22:15:00.000Z","agent":"Alpha","type":"task.start","target":"task-1"}
-```
+## 六、 致敬与开源协议
 
-This design provides:
+- **理论灵感**：致敬 **Noam Brown (OpenAI)** 关于测试期算力与无中心蜂群的深刻洞见，以及 **Anthropic** 在超级蜂群生物酶发现上的开创性工程实践；
+- **原型基础**：感谢 **Tom X Nguyen ([monotykamary](https://github.com/monotykamary))** 最初在 `pi-messenger-swarm` 上打下的文件协作基础。
 
-- **Atomic channel creation** — metadata and first event written together
-- **Append-only feeds** — events never modified, only added
-- **Natural event sourcing** — full history preserved in file order
-- **Efficient tail reads** — recent events at end of file
-- **Simple caching** — stat mtime + size for invalidation
-
-## Breaking Changes
-
-This design intentionally breaks older messaging assumptions.
-
-- `broadcast` action was removed
-- `send` without `to` was removed
-- feed history is now stored per channel at `.pi/messenger/channels/<channel>.jsonl` (unified format: metadata header + events)
-- tasks are now stored per session at `.pi/messenger/tasks/<session>.jsonl`
-- session channels are phrase-based instead of `session-*` timestamp-like ids
-
-Use these patterns instead:
-
-```bash
-pi-messenger-swarm send AgentName "..."
-pi-messenger-swarm send #channel "..."
-```
-
-## Environment Variables
-
-Override the default project-scoped behavior:
-
-| Variable                        | Effect                                           |
-| ------------------------------- | ------------------------------------------------ |
-| `PI_MESSENGER_DIR=/path/to/dir` | Use custom directory for all state               |
-| `PI_MESSENGER_GLOBAL=1`         | Use legacy global mode (`~/.pi/agent/messenger`) |
-
-```bash
-# Custom location
-PI_MESSENGER_DIR=/tmp/swarm-state pi
-
-# Legacy global mode (not recommended)
-PI_MESSENGER_GLOBAL=1 pi
-```
-
-### Global Mode (Legacy)
-
-For backwards compatibility only - agents from ALL projects share state:
-
-- `~/.pi/agent/messenger/registry` - Agent registrations
-- `~/.pi/agent/messenger/inbox` - Cross-agent messaging
-
-## Legacy Orchestration Actions
-
-Legacy PRD planner/worker/reviewer actions are disabled in swarm mode:
-
-- `plan*`
-- `work*`
-- `review*`
-- `crew.*` (legacy alias namespace)
-
-Use `task.*`, `spawn.*`, and `swarm` instead.
-
-## License
-
-MIT
+本项目采用 [MIT 许可证](LICENSE) 开源。

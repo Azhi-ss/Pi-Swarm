@@ -5,9 +5,16 @@ import type {
   TaskEvent,
   CreatedPayload,
   ClaimedPayload,
+  StakedPayload,
+  RenewedPayload,
   ProgressPayload,
   CompletedPayload,
+  VerifiedPayload,
+  VerificationFailedPayload,
+  DeadEndPayload,
   BlockedPayload,
+  ProposedPayload,
+  ChallengedPayload,
 } from './types.js';
 import { getTasksJsonlPath, ensureDir } from './persistence.js';
 import { normalizeChannelId } from '../../channel.js';
@@ -50,6 +57,7 @@ export function replayEventsToMap(cwd: string, sessionId: string): Map<string, S
             created_by: payload.createdBy,
             channel: event.channel,
             attempt_count: 0,
+            verify_command: payload.verifyCommand,
           };
           tasksById.set(event.taskId, task);
           break;
@@ -63,6 +71,40 @@ export function replayEventsToMap(cwd: string, sessionId: string): Map<string, S
           existing.claimed_at = event.timestamp;
           existing.claim_reason = payload.reason;
           existing.attempt_count = (existing.attempt_count ?? 0) + 1;
+          const ttl = 300;
+          existing.lease_ttl = ttl;
+          existing.lease_expires_at = new Date(
+            Date.parse(event.timestamp) + ttl * 1000
+          ).toISOString();
+          existing.updated_at = event.timestamp;
+          break;
+        }
+
+        case 'staked': {
+          if (!existing) continue;
+          const payload = event.payload as StakedPayload;
+          existing.status = 'staked';
+          existing.claimed_by = event.agent;
+          existing.claimed_at = event.timestamp;
+          existing.claim_reason = payload.reason;
+          existing.attempt_count = (existing.attempt_count ?? 0) + 1;
+          const ttl = payload.ttl ?? existing.lease_ttl ?? 300;
+          existing.lease_ttl = ttl;
+          existing.lease_expires_at = new Date(
+            Date.parse(event.timestamp) + ttl * 1000
+          ).toISOString();
+          existing.updated_at = event.timestamp;
+          break;
+        }
+
+        case 'renewed': {
+          if (!existing) continue;
+          const payload = event.payload as RenewedPayload;
+          const ttl = payload.ttl ?? existing.lease_ttl ?? 300;
+          existing.lease_ttl = ttl;
+          existing.lease_expires_at = new Date(
+            Date.parse(event.timestamp) + ttl * 1000
+          ).toISOString();
           existing.updated_at = event.timestamp;
           break;
         }
@@ -73,6 +115,8 @@ export function replayEventsToMap(cwd: string, sessionId: string): Map<string, S
           delete existing.claimed_by;
           delete existing.claimed_at;
           delete existing.claim_reason;
+          delete existing.lease_ttl;
+          delete existing.lease_expires_at;
           existing.updated_at = event.timestamp;
           break;
         }
@@ -86,6 +130,15 @@ export function replayEventsToMap(cwd: string, sessionId: string): Map<string, S
             agent: event.agent ?? 'unknown',
             message: payload.message,
           });
+          // Extend lease on progress if task has an active lease
+          if (
+            existing.lease_ttl &&
+            (existing.status === 'in_progress' || existing.status === 'staked')
+          ) {
+            existing.lease_expires_at = new Date(
+              Date.parse(event.timestamp) + existing.lease_ttl * 1000
+            ).toISOString();
+          }
           existing.updated_at = event.timestamp;
           break;
         }
@@ -98,6 +151,68 @@ export function replayEventsToMap(cwd: string, sessionId: string): Map<string, S
           existing.completed_by = event.agent;
           existing.summary = payload.summary;
           existing.evidence = payload.evidence;
+          delete existing.lease_ttl;
+          delete existing.lease_expires_at;
+          existing.updated_at = event.timestamp;
+          break;
+        }
+
+        case 'verified': {
+          if (!existing) continue;
+          const payload = event.payload as VerifiedPayload;
+          existing.status = 'verified';
+          existing.completed_at = event.timestamp;
+          existing.completed_by = event.agent;
+          existing.summary = payload.summary;
+          existing.evidence = payload.evidence;
+          existing.verification = {
+            verifiedAt: event.timestamp,
+            verifiedBy: event.agent ?? 'unknown',
+            command: payload.command,
+            exitCode: payload.exitCode,
+            patch: payload.patch,
+            outputSnippet: payload.outputSnippet,
+          };
+          delete existing.lease_ttl;
+          delete existing.lease_expires_at;
+          existing.updated_at = event.timestamp;
+          break;
+        }
+
+        case 'verification_failed': {
+          if (!existing) continue;
+          const payload = event.payload as VerificationFailedPayload;
+          existing.verification_attempts = payload.attempt;
+          existing.last_verification_failure = {
+            timestamp: event.timestamp,
+            agent: payload.agent,
+            command: payload.command,
+            exitCode: payload.exitCode,
+            output: payload.output,
+          };
+          existing.updated_at = event.timestamp;
+          break;
+        }
+
+        case 'dead_end': {
+          if (!existing) continue;
+          const payload = event.payload as DeadEndPayload;
+          existing.status = 'dead_end';
+          existing.dead_end_reason = payload.reason;
+          existing.dead_end_at = event.timestamp;
+          delete existing.claimed_by;
+          delete existing.claimed_at;
+          delete existing.claim_reason;
+          delete existing.lease_ttl;
+          delete existing.lease_expires_at;
+          if (!existing.dead_ends) existing.dead_ends = [];
+          existing.dead_ends.push({
+            id: `de-${existing.dead_ends.length + 1}`,
+            agent: payload.agent ?? event.agent ?? 'unknown',
+            reason: payload.reason,
+            errorLog: payload.lastOutput,
+            timestamp: event.timestamp,
+          });
           existing.updated_at = event.timestamp;
           break;
         }
@@ -137,6 +252,9 @@ export function replayEventsToMap(cwd: string, sessionId: string): Map<string, S
           delete existing.evidence;
           delete existing.blocked_reason;
           delete existing.blocked_by;
+          delete existing.lease_ttl;
+          delete existing.lease_expires_at;
+          delete existing.verification;
           existing.updated_at = event.timestamp;
           break;
         }
@@ -145,6 +263,35 @@ export function replayEventsToMap(cwd: string, sessionId: string): Map<string, S
           if (!existing) continue;
           existing.status = 'archived';
           existing.archived_at = event.timestamp;
+          existing.updated_at = event.timestamp;
+          break;
+        }
+
+        case 'proposed': {
+          if (!existing) continue;
+          const payload = event.payload as ProposedPayload;
+          if (!existing.proposals) existing.proposals = [];
+          existing.proposals.push({
+            id: `prop-${existing.proposals.length + 1}`,
+            agent: payload.author ?? event.agent ?? 'unknown',
+            content: payload.proposal,
+            timestamp: event.timestamp,
+          });
+          existing.updated_at = event.timestamp;
+          break;
+        }
+
+        case 'challenged': {
+          if (!existing) continue;
+          const payload = event.payload as ChallengedPayload;
+          if (!existing.challenges) existing.challenges = [];
+          existing.challenges.push({
+            id: `chal-${existing.challenges.length + 1}`,
+            agent: payload.challenger ?? event.agent ?? 'unknown',
+            content: payload.objection,
+            targetClaimant: payload.targetClaimant ?? existing.claimed_by,
+            timestamp: event.timestamp,
+          });
           existing.updated_at = event.timestamp;
           break;
         }

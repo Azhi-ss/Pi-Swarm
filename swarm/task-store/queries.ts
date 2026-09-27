@@ -37,27 +37,61 @@ function isAgentActive(cwd: string, agentName: string): boolean | null {
 }
 
 /**
- * Clean up stale task claims from crashed or departed agents.
+ * Check if a task's lease has expired.
+ */
+export function isLeaseExpired(task: SwarmTask, now: number = Date.now()): boolean {
+  if (task.status !== 'in_progress' && task.status !== 'staked') return false;
+  if (!task.lease_expires_at) return false;
+  return now >= Date.parse(task.lease_expires_at);
+}
+
+/**
+ * Clean up stale task claims from crashed or departed agents or expired leases.
  * Returns the number of claims that were cleaned up.
  */
 function cleanupStaleTaskClaims(cwd: string, sessionId: string): number {
   const registryDir = path.join(cwd, '.pi', 'messenger', 'registry');
-  if (!fs.existsSync(registryDir)) return 0;
+  const hasRegistry = fs.existsSync(registryDir);
 
   // Use replayTasks directly instead of getTasks to avoid triggering cleanup recursively
   const tasks = replayTasks(cwd, sessionId);
   let cleaned = 0;
 
-  const knownAgents = fs.existsSync(registryDir)
+  const knownAgents = hasRegistry
     ? fs
         .readdirSync(registryDir)
         .filter((f) => f.endsWith('.json'))
         .map((f) => f.slice(0, -5))
     : [];
 
-  for (const task of tasks) {
-    if (task.status !== 'in_progress' || !task.claimed_by) continue;
+  const now = Date.now();
 
+  for (const task of tasks) {
+    if ((task.status !== 'in_progress' && task.status !== 'staked') || !task.claimed_by) continue;
+
+    // 1. Check TTL lease expiration
+    if (isLeaseExpired(task, now)) {
+      appendTaskEvent(cwd, sessionId, {
+        taskId: task.id,
+        type: 'released',
+        timestamp: new Date().toISOString(),
+        agent: task.claimed_by,
+      });
+      logFeedEvent(
+        cwd,
+        task.claimed_by,
+        'task.reset',
+        task.id,
+        'lease expired - task auto-released',
+        task.channel ?? 'unknown'
+      );
+      cleaned++;
+      continue;
+    }
+
+    if (!hasRegistry) continue;
+
+    // 2. Check process liveness
     const active = isAgentActive(cwd, task.claimed_by);
     if (active === false) {
       // Append release event directly (same as unclaimTask)
@@ -140,9 +174,12 @@ export function getSummaryForTasks(tasks: SwarmTask[]): SwarmSummary {
   return {
     total: tasks.length,
     todo: tasks.filter((t) => t.status === 'todo').length,
-    in_progress: tasks.filter((t) => t.status === 'in_progress').length,
-    done: tasks.filter((t) => t.status === 'done').length,
+    in_progress: tasks.filter((t) => t.status === 'in_progress' || t.status === 'staked').length,
+    done: tasks.filter((t) => t.status === 'done' || t.status === 'verified').length,
     blocked: tasks.filter((t) => t.status === 'blocked').length,
+    staked: tasks.filter((t) => t.status === 'staked').length,
+    verified: tasks.filter((t) => t.status === 'verified').length,
+    dead_end: tasks.filter((t) => t.status === 'dead_end').length,
   };
 }
 
@@ -151,8 +188,28 @@ export function getReadyTasks(cwd: string, sessionId: string): SwarmTask[] {
 }
 
 export function getReadyTasksForTasks(tasks: SwarmTask[]): SwarmTask[] {
-  const doneIds = new Set(tasks.filter((t) => t.status === 'done').map((t) => t.id));
+  const doneIds = new Set(
+    tasks.filter((t) => t.status === 'done' || t.status === 'verified').map((t) => t.id)
+  );
   return tasks.filter((t) => t.status === 'todo' && t.depends_on.every((dep) => doneIds.has(dep)));
+}
+
+export function getGoalTasks(cwd: string, sessionId: string): SwarmTask[] {
+  return getTasks(cwd, sessionId).filter((t) => t.status === 'todo' || t.status === 'blocked');
+}
+
+export function getStakedTasks(cwd: string, sessionId: string): SwarmTask[] {
+  return getTasks(cwd, sessionId).filter(
+    (t) => t.status === 'staked' || t.status === 'in_progress'
+  );
+}
+
+export function getVerifiedTasks(cwd: string, sessionId: string): SwarmTask[] {
+  return getAllTasks(cwd, sessionId).filter((t) => t.status === 'verified' || t.status === 'done');
+}
+
+export function getGraveyardTasks(cwd: string, sessionId: string): SwarmTask[] {
+  return getAllTasks(cwd, sessionId).filter((t) => t.status === 'dead_end');
 }
 
 export function getStalledTasks(

@@ -21,9 +21,6 @@ export async function handleSessionShutdown(
 
   if (state.registered) {
     const sessionId = getEffectiveSessionId(cwd, state);
-    const { listSpawnedHistory } = await import('../swarm/spawn.js');
-    const spawnedAgents = listSpawnedHistory(cwd, sessionId);
-    const spawnedNames = new Set(spawnedAgents.map((s) => s.name));
 
     // Get all tasks for this session
     const allTasks = taskStore.getTasks(cwd, sessionId);
@@ -40,23 +37,6 @@ export async function handleSessionShutdown(
         'task.reset',
         task.id,
         'agent left - task unclaimed',
-        state.currentChannel
-      );
-      unclaimedCount++;
-    }
-
-    // Unclaim tasks held by spawned agents
-    const spawnedClaimedTasks = allTasks.filter(
-      (t) => t.status === 'in_progress' && t.claimed_by && spawnedNames.has(t.claimed_by)
-    );
-    for (const task of spawnedClaimedTasks) {
-      taskStore.unclaimTask(cwd, sessionId, task.id, task.claimed_by!);
-      logFeedEvent(
-        cwd,
-        task.claimed_by!,
-        'task.reset',
-        task.id,
-        'parent agent left - task unclaimed',
         state.currentChannel
       );
       unclaimedCount++;

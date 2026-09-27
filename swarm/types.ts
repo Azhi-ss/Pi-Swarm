@@ -1,10 +1,52 @@
-export type SwarmTaskStatus = 'todo' | 'in_progress' | 'done' | 'blocked' | 'archived';
+export type SwarmTaskStatus =
+  | 'todo'
+  | 'staked'
+  | 'in_progress'
+  | 'verified'
+  | 'done'
+  | 'dead_end'
+  | 'blocked'
+  | 'archived';
 
 export interface SwarmTaskEvidence {
   commits?: string[];
   tests?: string[];
   prs?: string[];
 }
+
+export interface SwarmTaskVerification {
+  verifiedAt: string;
+  verifiedBy: string;
+  command: string;
+  exitCode: number;
+  patch?: string;
+  outputSnippet?: string;
+}
+
+export interface SwarmTaskDeadEndRecord {
+  id: string;
+  agent: string;
+  reason: string;
+  errorLog?: string;
+  timestamp: string;
+}
+
+export interface TaskProposalRecord {
+  id: string;
+  agent: string;
+  content: string;
+  timestamp: string;
+}
+export type TaskProposal = TaskProposalRecord;
+
+export interface TaskChallengeRecord {
+  id: string;
+  agent: string;
+  content: string;
+  timestamp: string;
+  targetClaimant?: string;
+}
+export type TaskChallenge = TaskChallengeRecord;
 
 export interface SwarmTask {
   id: string;
@@ -27,6 +69,25 @@ export interface SwarmTask {
   channel?: string;
   archived_at?: string;
   progress_log?: Array<{ timestamp: string; agent: string; message: string }>;
+  proposals?: TaskProposalRecord[];
+  challenges?: TaskChallengeRecord[];
+
+  // Module 3 & 4 additions
+  verify_command?: string;
+  lease_ttl?: number; // Lease duration in seconds (default 300)
+  lease_expires_at?: string; // ISO timestamp
+  verification?: SwarmTaskVerification;
+  dead_ends?: SwarmTaskDeadEndRecord[];
+  dead_end_reason?: string;
+  dead_end_at?: string;
+  verification_attempts?: number;
+  last_verification_failure?: {
+    timestamp: string;
+    agent: string;
+    command: string;
+    exitCode: number;
+    output: string;
+  };
 }
 
 export interface SwarmTaskCreateInput {
@@ -35,6 +96,8 @@ export interface SwarmTaskCreateInput {
   dependsOn?: string[];
   createdBy?: string;
   channel?: string;
+  verifyCommand?: string;
+  leaseTtl?: number;
 }
 
 export interface SwarmSummary {
@@ -43,6 +106,9 @@ export interface SwarmSummary {
   in_progress: number;
   done: number;
   blocked: number;
+  staked?: number;
+  verified?: number;
+  dead_end?: number;
 }
 
 export interface SpawnRequest {
@@ -74,4 +140,7 @@ export interface SpawnedAgent {
   error?: string;
   sessionId?: string;
   pid?: number;
+  worktreePath?: string;
+  port?: number;
+  testPort?: number;
 }

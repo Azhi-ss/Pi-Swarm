@@ -157,7 +157,8 @@ export async function executeAction(
         state,
         cwd,
         params.channel ?? requireChannel(),
-        sessionId
+        sessionId,
+        deliverMessage
       );
     }
 
@@ -208,6 +209,73 @@ export async function executeAction(
       }
       return executeTask(
         'done',
+        { ...params, id: taskId },
+        state,
+        cwd,
+        params.channel ?? requireChannel(),
+        sessionId,
+        deliverMessage
+      );
+    }
+
+    case 'done': {
+      const taskId = params.taskId ?? params.id;
+      if (!taskId) {
+        return result('Error: id or taskId required for done action.', {
+          mode: 'done',
+          error: 'missing_task_id',
+        });
+      }
+      return executeTask(
+        'done',
+        { ...params, id: taskId },
+        state,
+        cwd,
+        params.channel ?? requireChannel(),
+        sessionId,
+        deliverMessage
+      );
+    }
+
+    case 'blackboard': {
+      return executeTask(
+        'blackboard',
+        params,
+        state,
+        cwd,
+        params.channel ?? requireChannel(),
+        sessionId
+      );
+    }
+
+    case 'propose': {
+      const taskId = params.taskId ?? params.id;
+      if (!taskId) {
+        return result('Error: id or taskId required for propose action.', {
+          mode: 'propose',
+          error: 'missing_task_id',
+        });
+      }
+      return executeTask(
+        'propose',
+        { ...params, id: taskId },
+        state,
+        cwd,
+        params.channel ?? requireChannel(),
+        sessionId
+      );
+    }
+
+    case 'challenge': {
+      const taskId = params.taskId ?? params.id;
+      if (!taskId) {
+        return result('Error: id or taskId required for challenge action.', {
+          mode: 'challenge',
+          error: 'missing_task_id',
+        });
+      }
+      return executeTask(
+        'challenge',
         { ...params, id: taskId },
         state,
         cwd,

@@ -3,13 +3,20 @@ import type { SwarmTaskEvidence } from '../types.js';
 export type TaskEventType =
   | 'created'
   | 'claimed'
+  | 'staked'
+  | 'renewed'
   | 'released'
   | 'progress'
   | 'completed'
+  | 'verified'
+  | 'dead_end'
+  | 'verification_failed'
   | 'blocked'
   | 'unblocked'
   | 'reset'
-  | 'archived';
+  | 'archived'
+  | 'proposed'
+  | 'challenged';
 
 export interface TaskEvent {
   taskId: string;
@@ -26,6 +33,47 @@ export interface CreatedPayload {
   content?: string;
   dependsOn?: string[];
   createdBy?: string;
+  verifyCommand?: string;
+}
+
+export interface StakedPayload {
+  ttl?: number; // Lease duration in seconds (default 300)
+  proposalId?: string;
+  reason?: string;
+}
+
+export interface RenewedPayload {
+  ttl?: number;
+  reason?: string;
+}
+
+export interface VerifiedPayload {
+  summary: string;
+  command: string;
+  exitCode: number; // 0
+  patch?: string; // Path to .patch file
+  evidence?: SwarmTaskEvidence;
+  outputSnippet?: string;
+}
+
+export interface VerificationFailedPayload {
+  agent: string;
+  attempt: number;
+  maxAttempts: number;
+  command: string;
+  exitCode: number;
+  output: string;
+}
+
+export interface DeadEndPayload {
+  agent: string;
+  reason: string;
+  hypothesis?: string;
+  attempts: number;
+  lastCommand: string;
+  lastOutput: string;
+  failureSummary?: string;
+  refutedProposalId?: string;
 }
 
 export interface ClaimedPayload {
@@ -47,4 +95,15 @@ export interface CompletedPayload {
 export interface BlockedPayload {
   reason: string;
   blockedBy?: string;
+}
+
+export interface ProposedPayload {
+  proposal: string;
+  author?: string;
+}
+
+export interface ChallengedPayload {
+  objection: string;
+  challenger?: string;
+  targetClaimant?: string;
 }

@@ -29,6 +29,8 @@ export type FeedEventType =
   | 'edit'
   | 'task.start'
   | 'task.done'
+  | 'task.verified'
+  | 'task.dead_end'
   | 'task.block'
   | 'task.unblock'
   | 'task.reset'
@@ -38,6 +40,8 @@ export type FeedEventType =
   | 'task.split'
   | 'task.revise'
   | 'task.revise-tree'
+  | 'task.propose'
+  | 'task.challenge'
   | 'plan.start'
   | 'plan.pass.start'
   | 'plan.pass.done'
@@ -264,6 +268,8 @@ export function pruneFeed(cwd: string, maxEvents: number, channelId: string): vo
 const SWARM_EVENT_TYPES = new Set<FeedEventType>([
   'task.start',
   'task.done',
+  'task.verified',
+  'task.dead_end',
   'task.block',
   'task.unblock',
   'task.reset',
@@ -272,6 +278,8 @@ const SWARM_EVENT_TYPES = new Set<FeedEventType>([
   'task.split',
   'task.revise',
   'task.revise-tree',
+  'task.propose',
+  'task.challenge',
   'plan.start',
   'plan.pass.start',
   'plan.pass.done',
@@ -340,6 +348,12 @@ export function formatFeedLine(event: FeedEvent): string {
     case 'task.done':
       line += withPreview(` completed ${target}`);
       break;
+    case 'task.verified':
+      line += withPreview(` verified ${target}`);
+      break;
+    case 'task.dead_end':
+      line += withPreview(` 🪦 dead_end ${target}`);
+      break;
     case 'task.block':
       line += withPreview(` blocked ${target}`);
       break;
@@ -363,6 +377,12 @@ export function formatFeedLine(event: FeedEvent): string {
       break;
     case 'task.revise-tree':
       line += withPreview(` revised ${target} + dependents`);
+      break;
+    case 'task.propose':
+      line += withPreview(` proposed ${target}`);
+      break;
+    case 'task.challenge':
+      line += withPreview(` challenged ${target}`);
       break;
     case 'plan.start':
       line += withPreview(' planning started');
