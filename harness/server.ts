@@ -174,15 +174,15 @@ function resolveAgentState(
   callerPid?: number,
   agentName?: string,
   channelHint?: string,
-  requestSessionId?: string
+  requestSessionId?: string,
+  projectCwd?: string
 ): {
   state: MessengerState;
   resolvedCwd: string;
 } {
   // Default to the project cwd (set by the extension via PI_MESSENGER_CWD
   // when spawning the harness). Fall back to process.cwd() if not available.
-  let resolvedCwd = normalizeCwd(process.env.PI_MESSENGER_CWD ?? process.cwd());
-  const gitBranch = getGitBranch(resolvedCwd);
+  const resolvedCwd = normalizeCwd(projectCwd ?? process.env.PI_MESSENGER_CWD ?? process.cwd());
 
   let registered = false;
   let resolvedName = '';
@@ -355,7 +355,7 @@ function resolveAgentState(
       channelPostHistory: [],
       seenSenders: new Map(),
       model: '',
-      gitBranch,
+      gitBranch: getGitBranch(resolvedCwd),
       spec: undefined,
       scopeToFolder: configForCwd(resolvedCwd).scopeToFolder,
       isHuman: false,
@@ -548,7 +548,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     // Pre-resolve state from the startup dirs to read the registration's cwd
     const preState = resolveAgentState(startupDirs, callerPid, agentName, channelHint, sessionId);
     // If the matched registration has a cwd, prefer it (it reflects the agent's project)
-    if (preState.state.registered && preState.resolvedCwd) {
+    if (!callerCwd && preState.state.registered && preState.resolvedCwd) {
       projectCwd = preState.resolvedCwd;
     }
     // Re-resolve with project-specific dirs and config
@@ -561,7 +561,8 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
       callerPid,
       agentName,
       channelHint,
-      sessionId
+      sessionId,
+      projectCwd
     );
     // Use session ID from header (written by extension to .pi/messenger/session-id)
     // if available, otherwise fall back to the state's contextSessionId (from disk).

@@ -1,6 +1,14 @@
-import type { Dirs, MessengerState } from '../../lib.js';
+import * as fs from 'node:fs';
+import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import {
+  isValidAgentName,
+  type AgentMailMessage,
+  type Dirs,
+  type MessengerState,
+} from '../../lib.js';
 import { displayChannelLabel, normalizeChannelId } from '../../channel.js';
-import { findSpawnedAgentByName } from '../../swarm/spawn.js';
+import { listSpawnedHistory } from '../../swarm/spawn.js';
 import { getEffectiveSessionId } from '../../store/shared.js';
 import {
   formatFeedLine,
@@ -13,11 +21,11 @@ import { notRegisteredError, result } from '../result.js';
 
 export function executeSend(
   state: MessengerState,
-  _dirs: Dirs,
+  dirs: Dirs,
   cwd: string,
   to: string | string[] | undefined,
   message?: string,
-  _replyTo?: string,
+  replyTo?: string,
   channel?: string
 ) {
   if (!state.registered) {
@@ -45,48 +53,56 @@ export function executeSend(
   const isChannelTarget = typeof to === 'string' && to.startsWith('#');
   const targetChannel = isChannelTarget ? normalizeChannelId(to) : channel || state.currentChannel;
 
-  // Check if targeting a completed/failed/stopped spawned agent
-  let spawnWarning = '';
-  if (typeof to === 'string' && !isChannelTarget) {
-    const sessionId = getEffectiveSessionId(cwd, state);
-    const spawnedAgent = findSpawnedAgentByName(cwd, sessionId, to);
-    if (spawnedAgent && spawnedAgent.status !== 'running') {
-      const statusEmoji =
-        spawnedAgent.status === 'completed' ? '✅' : spawnedAgent.status === 'failed' ? '❌' : '🛑';
-      spawnWarning = `\n\n⚠️ Warning: ${to} is a spawned agent that has already ${spawnedAgent.status} ${statusEmoji}. The message will be logged to the feed, but the agent process is no longer active.`;
-      if (spawnedAgent.status === 'completed') {
-        spawnWarning += `\n   If you need to continue the work, consider spawning a new agent.`;
-      } else if (spawnedAgent.status === 'failed') {
-        spawnWarning += `\n   The agent failed with errors. Review the task and consider respawning.`;
-      }
-    }
+  if (isChannelTarget) {
+    logFeedEvent(cwd, state.agentName, 'message', to, message, targetChannel);
+    return result(`Message posted to ${to}.`, { mode: 'send', channel: targetChannel, to });
   }
 
-  // All messaging is now feed-based
-  logFeedEvent(
-    cwd,
-    state.agentName,
-    'message',
-    typeof to === 'string' ? to : undefined,
-    message,
-    targetChannel
-  );
+  const targets = Array.isArray(to) ? to : [to];
+  const spawned = listSpawnedHistory(cwd, getEffectiveSessionId(cwd, state));
+  const recipients = [
+    ...new Set(
+      targets.map((target) => spawned.find((agent) => agent.id === target)?.name ?? target)
+    ),
+  ];
+  if (recipients.some((name) => typeof name !== 'string' || !isValidAgentName(name))) {
+    return result(
+      'Error: recipient must be an agent name (letters, numbers, underscore, hyphen).',
+      {
+        mode: 'send',
+        error: 'invalid_recipient',
+      }
+    );
+  }
 
-  const targetLabel = typeof to === 'string' ? to : 'multiple recipients';
-  const channelLabel = displayChannelLabel(targetChannel);
-  // If the target is already a channel reference, just say "posted to #channel"
-  let text = isChannelTarget
-    ? `Message posted to ${targetLabel}.`
-    : `Message posted to ${targetLabel} on ${channelLabel}.`;
+  const inboxDir = join(dirs.base, 'inbox');
+  fs.mkdirSync(inboxDir, { recursive: true });
+  for (const recipient of recipients) {
+    const mail: AgentMailMessage = {
+      id: randomUUID(),
+      from: state.agentName,
+      to: recipient,
+      text: message,
+      timestamp: new Date().toISOString(),
+      replyTo: replyTo ?? null,
+      channel: targetChannel,
+    };
+    fs.appendFileSync(join(inboxDir, `${recipient}.jsonl`), JSON.stringify(mail) + '\n', 'utf8');
+  }
 
-  // Append warning if targeting a completed/failed/stopped agent
-  text += spawnWarning;
-
+  const inactive = recipients.filter((name) => {
+    const agent = spawned.find((agent) => agent.name === name);
+    return agent && agent.status !== 'running';
+  });
+  let text = `Message delivered to ${recipients.join(', ')} inbox.`;
+  if (inactive.length)
+    text += `\nWarning: ${inactive.join(', ')} is no longer running; messages are queued on disk.`;
   return result(text, {
     mode: 'send',
     channel: targetChannel,
-    to: typeof to === 'string' ? to : undefined,
-    warning: spawnWarning ? 'target_agent_completed' : undefined,
+    to,
+    delivered: recipients,
+    warning: inactive.length ? 'target_agent_completed' : undefined,
   });
 }
 

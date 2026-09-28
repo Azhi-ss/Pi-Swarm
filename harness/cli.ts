@@ -46,7 +46,7 @@
  * registrations on disk.
  */
 
-import { execSync, spawn as spawnChild } from 'node:child_process';
+import { execFileSync, execSync, spawn as spawnChild } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -299,8 +299,28 @@ async function isUp(): Promise<boolean> {
  * (e.g., dist/) the CLI was invoked from.
  */
 function resolveProjectRoot(start: string): string {
+  const swarmRoot = process.env.PI_SWARM_PROJECT_ROOT?.trim();
+  if (swarmRoot) return path.resolve(swarmRoot);
   let dir = start;
   for (let i = 0; i < 20; i++) {
+    const gitPath = path.join(dir, '.git');
+    if (fs.existsSync(gitPath) && fs.statSync(gitPath).isFile()) {
+      try {
+        const commonDir = execFileSync(
+          'git',
+          ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+          {
+            cwd: dir,
+            encoding: 'utf8',
+            timeout: 2000,
+            stdio: ['ignore', 'pipe', 'ignore'],
+          }
+        ).trim();
+        return path.dirname(commonDir);
+      } catch {
+        // Fall back to the local root if Git metadata is unavailable.
+      }
+    }
     if (fs.existsSync(path.join(dir, '.git')) || fs.existsSync(path.join(dir, '.pi'))) {
       return dir;
     }
@@ -381,7 +401,7 @@ async function postAction(jsonBody: string): Promise<void> {
     try {
       const parsed = JSON.parse(body);
       if (parsed.ok && parsed.result?.text) {
-        if (parsed.result.details?.error === 'verification_failed') {
+        if (parsed.result.details?.error) {
           process.stderr.write(parsed.result.text + '\n');
           process.exit(1);
         }
@@ -462,7 +482,8 @@ async function main(): Promise<void> {
 
 Usage:
   pi-messenger-swarm join [--channel dev] [--create]
-  pi-messenger-swarm status
+  pi-messenger-swarm status [--self]
+  pi-messenger-swarm peers [--task <taskId>]
   pi-messenger-swarm list
   pi-messenger-swarm whois <name>
   pi-messenger-swarm feed [--limit 20] [--channel dev]
@@ -631,7 +652,13 @@ Environment:
       break;
     }
     case 'status': {
-      await postAction(buildAction({ action: 'status' }));
+      const self = extractFlagBool(args, 'self');
+      await postAction(buildAction({ action: 'status', self: self || undefined }));
+      break;
+    }
+    case 'peers': {
+      const taskId = extractFlag(args, 'task');
+      await postAction(buildAction({ action: 'peers', taskId }));
       break;
     }
     case 'list': {

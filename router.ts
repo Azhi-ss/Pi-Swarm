@@ -11,6 +11,7 @@ import { executeSpawn, executeSwarmStatus, executeTask } from './swarm/handlers.
 import { getEffectiveSessionId } from './store/shared.js';
 import { processManager } from './swarm/process-manager.js';
 import { circuitBreaker } from './swarm/circuit-breaker/index.js';
+import { executeSelfStatus, executePeers } from './handlers/coordination/peer-toolbox.js';
 
 type DeliverFn = (msg: AgentMailMessage) => void;
 type UpdateStatusFn = (ctx: ExtensionContext) => void;
@@ -81,10 +82,14 @@ export async function executeAction(
 
   switch (group) {
     case 'status':
+      if (params.self) return executeSelfStatus(state, cwd);
       return handlers.executeStatus(state, dirs, cwd);
 
     case 'list':
       return handlers.executeList(state, dirs, cwd, { stuckThreshold: config?.stuckThreshold });
+
+    case 'peers':
+      return executePeers(state, dirs, cwd, params.taskId);
 
     case 'whois': {
       if (!params.name) {

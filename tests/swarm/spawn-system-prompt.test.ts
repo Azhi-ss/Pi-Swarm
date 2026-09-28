@@ -76,6 +76,7 @@ describe('swarm spawn system prompt', () => {
     );
 
     expect(spawnMock).toHaveBeenCalledTimes(1);
+    expect(spawnMock.mock.calls[0][2].env.PI_SWARM_PROJECT_ROOT).toBe(cwd);
     const args = spawnMock.mock.calls[0][1] as string[];
 
     const idx = args.indexOf('--append-system-prompt');
@@ -92,6 +93,10 @@ describe('swarm spawn system prompt', () => {
     );
     expect(spawned.systemPrompt).toContain('## Role Description');
     expect(spawned.systemPrompt).toContain('Skeptical market researcher');
+    expect(spawned.systemPrompt).toContain('pi-messenger-swarm status --self');
+    expect(spawned.systemPrompt).toContain('pi-messenger-swarm peers --task <taskId>');
+    expect(spawned.systemPrompt).toContain('pi-messenger-swarm send <peer>');
+    expect(spawned.systemPrompt).toContain('.pi/messenger/inbox/');
 
     proc.emit('close', 0);
     expect(fs.existsSync(path.dirname(promptPath))).toBe(false);

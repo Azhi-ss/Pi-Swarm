@@ -28,6 +28,7 @@ export interface MessengerActionParams {
   reason?: string;
 
   // Coordination
+  self?: boolean;
   to?: string | string[];
   replyTo?: string;
   paths?: string[];

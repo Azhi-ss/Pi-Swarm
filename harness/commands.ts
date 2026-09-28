@@ -34,6 +34,13 @@ export const COMMAND_REGISTRY: CommandSpec[] = [
     cmd: 'status',
     action: 'status',
     description: 'Show agent status',
+    flags: ['self'],
+  },
+  {
+    cmd: 'peers',
+    action: 'peers',
+    description: 'Discover active peers and their staked tasks',
+    flags: ['task'],
   },
   {
     cmd: 'list',

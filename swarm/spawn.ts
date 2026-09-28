@@ -183,6 +183,9 @@ function buildSwarmProtocol(): string {
     '4. Adversarial Scrutiny & Debate: Challenge flawed hypotheses or edge cases with concrete counter-examples and failing tests (`pi-messenger-swarm challenge <taskId> "Counter-example / failing test"`).',
     '5. Objective Machine Verification: Never rely on verbal assertions or peer praise. Validate all work with compilers (`tsc`), linters, and tests (`vitest`). A task is only complete when verified by automated checks (exit code 0).',
     '6. Ephemeral Focus & Clean Turn Completion: Once your milestone is verified, record the evidence and artifacts in the task record (`pi-messenger-swarm task done <taskId> "Evidence & summary"`), release held resources, and cleanly complete your turn. Do not spin or idle; next-generation peers will continue from the blackboard state.',
+    '7. Self-Inspection: Run `pi-messenger-swarm status --self` to inspect your agentId, sandboxPath, currentTask, leaseExpiresIn (seconds), verificationAttempts, remainingRetries, lastError, and runtime port/testPort slots. Use the injected PORT, TEST_PORT and TMPDIR for work in your sandbox.',
+    '8. Peer Discovery: Run `pi-messenger-swarm peers` to discover active peers, or `pi-messenger-swarm peers --task <taskId>` to find peers with a live claim on that task. Agree on interfaces before changing shared contracts.',
+    '9. Direct Signaling: Use `pi-messenger-swarm send <peer> "Contract or coordination message"` to append to that peer\'s .pi/messenger/inbox/<peer>.jsonl. Read your own inbox at $PI_SWARM_PROJECT_ROOT/.pi/messenger/inbox/$PI_AGENT_NAME.jsonl between milestones (a missing file means no messages yet). Messages are pull-based; check the inbox and feed yourself.',
   ].join('\n');
 }
 
@@ -535,6 +538,7 @@ export function spawnSubagent(
   const env = {
     ...process.env,
     PI_AGENT_NAME: name,
+    PI_SWARM_PROJECT_ROOT: cwd,
     ...(inheritedChannel ? { PI_MESSENGER_CHANNEL: inheritedChannel } : {}),
     TMPDIR: worktree.tmpDir,
     PORT: String(worktree.port),

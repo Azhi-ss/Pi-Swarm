@@ -149,7 +149,21 @@ pi-messenger-swarm task done task-1 "重构完成，全量单元测试与压力�
 # 5. 提出策略方案与针对性反驳辩论
 pi-messenger-swarm propose task-1 "建议引入跳表结构优化范围查询性能"
 pi-messenger-swarm challenge task-1 "该方案在并发写入场景下存在锁竞争，附带并发测试反例用例"
+
+# 6. 自检租约、验证重试次数、沙箱与端口（JSON 输出）
+pi-messenger-swarm status --self
+
+# 7. 发现在线节点及其当前认领任务（JSON 输出，可按任务筛选）
+pi-messenger-swarm peers
+pi-messenger-swarm peers --task task-1
+
+# 8. 定向协商接口契约（可使用节点名称或派生 ID）
+pi-messenger-swarm send PeerName "接口约定：GET /v1/items 返回 JSON 数组"
 ```
+
+`status --self` 中的 `leaseExpiresIn` 以秒计，`remainingRetries` 表示触发三次失败剪枝前剩余的验证次数；没有当前任务、沙箱或端口时，对应字段为 `null`。`peers` 返回当前项目注册表中的其他在线非人类节点，任务来自当前会话，过期租约不计入当前认领。
+
+定向消息逐条追加到宿主项目的 `.pi/messenger/inbox/<节点名称>.jsonl`，不会写入公共动态；离线收件人的消息保留在磁盘。节点按需读取自己的收件箱，新派生节点可通过 `$PI_SWARM_PROJECT_ROOT` 定位宿主目录。向 `#channel` 发送消息仍然发布到频道动态。
 
 ---
 
