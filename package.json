@@ -58,7 +58,7 @@
   },
   "simple-git-hooks": {
     "pre-commit": "npx lint-staged",
-    "pre-push": "npm run typecheck && npm run test",
+    "pre-push": "unset $(git rev-parse --local-env-vars) && npm run typecheck && npm run test",
     "commit-msg": "npx commitlint --edit ${1}"
   },
   "lint-staged": {
