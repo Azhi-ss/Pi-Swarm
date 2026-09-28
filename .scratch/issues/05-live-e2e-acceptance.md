@@ -11,7 +11,8 @@
 
 ## Acceptance criteria
 
-- [ ] Target environment established in `~/swarm-target-arena` on base commit `6f1677c8` with reproducing test confirming Exit Code 1
+- [ ] Target environment established in isolated `~/swarm-target-arena/openai-agents-js` on base commit `6f1677c8` with reproducing test confirming Exit Code 1
+- [ ] Swarm plugin linked ephemerally via `pi install /home/dministrator/project/pi-swarm -l` (zero pollution to host global Pi config, zero npm publishing required)
 - [ ] 6 to 8 concurrent worker agents spawned with isolated detached worktrees (`.swarm/workspaces/worker-<id>`) and port slot allocation
 - [ ] Workers interact via the Four-Zone Blackboard (`BLACKBOARD.md`), soft-staking complementary hypotheses
 - [ ] Ground Truth Verifier gate intercepts `task done`, runs objective Vitest suite, and accepts only Exit Code 0

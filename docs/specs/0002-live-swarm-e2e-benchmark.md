@@ -69,21 +69,43 @@ To stress-test genuine concurrency, mesh communication, and conflict-safe merges
 
 ## 4. Execution Workflow & Sandbox Isolation
 
-### Phase 1: Arena Setup
+### Phase 1: Arena Setup & Project-Local Ephemeral Install (零污染单工程安装)
 
-1. Clone target repository into an isolated dogfood directory (`~/swarm-target-arena`).
-2. Checkout base commit `6f1677c854b8daa427cbb11d105eca9f0f84d1f6`.
-3. Apply reproducing test patch (`packages/agents-core/test/run.stream.test.ts`).
-4. Run verifier command to confirm red baseline (**Exit Code 1**).
+1. **物理目录与职责完全解耦**：
+   - **插件研发源目录**：`/home/dministrator/project/pi-swarm`（当前插件源码所在，负责编写、编译与单测）；
+   - **目标竞技场靶场目录**：`~/swarm-target-arena/openai-agents-js`（独立外置目录，绝不在当前项目内混合）；
+   - **绝对隔离**：Bug 绝不放入当前 `pi-swarm` 目录，两个项目文件系统 100% 物理隔离。
+
+2. **单工程临时安装（零污染正在使用的全局 Pi）**：
+   - 使用项目级局部安装命令：
+     ```bash
+     cd ~/swarm-target-arena/openai-agents-js
+     pi install /home/dministrator/project/pi-swarm -l
+     ```
+   - `-l` (`--local`) 保证插件配置仅写入靶场目录下的 `.pi/`，**绝不修改、绝不污染全局 `~/.pi`**，你的宿主 Pi 即使正在执行其他任务也完全不受任何干扰。
+   - **免发 NPM 包**：直接利用本地绝对路径软链/加载，无需发布任何 npm 包。
+
+3. **实时热修与自愈回路 (Rapid Hot-Reload)**：
+   - 若实跑中发现蜂群逻辑或 CLI 有 Bug，直接在 `/home/dministrator/project/pi-swarm` 修改代码并执行 `pnpm run build`；
+   - 靶场项目无需重新安装，下次启动自动加载最新的 `dist/` 构建产物，实现毫秒级快速自愈。
+
+4. **基线与红灯用例就绪**：
+   - 靶场检出目标基线 commit `6f1677c854b8daa427cbb11d105eca9f0f84d1f6`；
+   - 应用测试补丁 `packages/agents-core/test/run.stream.test.ts`；
+   - 执行客观验证命令，确认当前处于红灯（**Exit Code 1**，精准复现 Bug）。
 
 ### Phase 2: Swarm Launch (6–8 Workers)
 
-1. Launch swarm via local plugin integration:
+1. **启动位置**：在目标靶场根目录 `~/swarm-target-arena/openai-agents-js` 启动蜂群：
    ```bash
+   cd ~/swarm-target-arena/openai-agents-js
    pi-messenger-swarm spawn --count 8 --task "fix-streaming-agent-end" --verify "CI=1 NODE_ENV=test pnpm vitest run packages/agents-core/test/run.stream.test.ts"
    ```
-2. Each worker receives an isolated Git Detached Worktree in `.swarm/workspaces/worker-<id>` with symlinked `node_modules` and dedicated port slots.
-3. Workers parse `BLACKBOARD.md` and claim sub-hypotheses with 300s TTL leases via `task stake`.
+2. **沙箱物理派发**：
+   - 系统在靶场根目录下自动创建 `.swarm/workspaces/worker-1` 至 `worker-8` 的 Detached Worktree；
+   - 自动软链接复用靶场宿主的 `node_modules`，各 Worker 独立调用你配置好的真实大模型 API；
+   - 分配独立的端口偏移槽位（`PORT=3101..3108`, `TEST_PORT=3201..3208`）与 `TMPDIR`。
+3. Workers 读取靶场根目录下的单文件黑板快照 `BLACKBOARD.md`，通过 `task stake` 软认领各自假说（默认 300s TTL 租约）。
 
 ### Phase 3: Objective Machine Gate & Direct Atomic Merge
 
