@@ -5,6 +5,7 @@ import { once } from 'node:events';
 import { createServer } from 'node:net';
 import { createRequire } from 'node:module';
 import { promisify } from 'node:util';
+import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { executeAction } from '../../router.js';
 import * as taskStore from '../../swarm/task-store.js';
@@ -99,7 +100,7 @@ describe('observer commands', () => {
     expect(fs.existsSync(path.join(dirs.registry, 'ExitedPeer.json'))).toBe(true);
   });
 
-  it('runs all three CLI commands without joining and cleans a peer recovered after a harness restart', async () => {
+  it('runs all three installed CLI commands without joining and cleans a peer recovered after a harness restart', async () => {
     const run = promisify(execFile);
     const { cwd: buildDir } = createMessengerFixture('observer-build-');
     const root = path.resolve(import.meta.dirname, '../..');
@@ -149,6 +150,7 @@ describe('observer commands', () => {
     await new Promise<void>((resolve) => listener.close(() => resolve()));
     const env = {
       ...process.env,
+      PI_CODING_AGENT_DIR: path.join(buildDir, 'pi-agent'),
       PI_SWARM_PROJECT_ROOT: '',
       PI_AGENT_NAME: '',
       PI_AGENT_SESSION_ID: '',
@@ -166,12 +168,22 @@ describe('observer commands', () => {
     });
     const serverClosed = once(server, 'exit');
     const cli = (...args: string[]) =>
-      run(process.execPath, [path.join(buildDir, 'dist/harness/cli.js'), ...args], {
+      run(path.join(env.PI_CODING_AGENT_DIR, 'bin/pi-messenger-swarm'), args, {
         cwd: repo.gitDir,
         env,
         timeout: 10_000,
       });
     try {
+      await run(
+        process.execPath,
+        [
+          '--input-type=module',
+          '-e',
+          'const { installShellAlias } = await import(process.argv[1]); installShellAlias();',
+          pathToFileURL(path.join(buildDir, 'dist/extension/harness.js')).href,
+        ],
+        { cwd: repo.gitDir, env }
+      );
       await vi.waitFor(
         async () => expect((await fetch(`http://127.0.0.1:${port}/health`)).ok).toBe(true),
         { timeout: 10_000, interval: 50 }

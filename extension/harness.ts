@@ -76,12 +76,12 @@ export function installShellAlias(): void {
       fs.mkdirSync(agentBinDir, { recursive: true });
     }
 
-    const { command, prefixArgs, cliPath, cwd } = resolveCli();
+    const { command, prefixArgs, cliPath } = resolveCli();
     const linkPath = join(agentBinDir, 'pi-messenger-swarm');
 
     const argsStr = prefixArgs.length > 0 ? ` ${prefixArgs.join(' ')}` : '';
+    // The CLI resolves the target project from the caller's working directory.
     const wrapperContent = `#!/bin/sh
-cd "${cwd}" 2>/dev/null
 exec ${command}${argsStr} "${cliPath}" "$@"
 `;
 

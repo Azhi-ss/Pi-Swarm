@@ -161,6 +161,21 @@ describe('peer toolbox', () => {
     expect(fs.readdirSync(path.join(dirs.base, 'inbox'))).toEqual(['PeerB.jsonl']);
   });
 
+  it('excludes exited peers immediately after an observer status request', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-29T00:00:00Z'));
+    const { cwd, dirs, action } = fixture();
+    writeRegistration(dirs, { name: 'PeerB', cwd, sessionId });
+    writeRegistration(dirs, { name: 'ExitedPeer', cwd, pid: 2147483647 });
+
+    const observed = await action({ action: 'status' });
+    expect(observed.content[0].text).not.toContain('ExitedPeer');
+    expect(fs.existsSync(path.join(dirs.registry, 'ExitedPeer.json'))).toBe(true);
+
+    const peers = JSON.parse((await action({ action: 'peers' })).content[0].text);
+    expect(peers.map((peer: { name: string }) => peer.name)).toEqual(['PeerB']);
+  });
+
   it('keeps expired self leases inspectable and reports the latest verifier error', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-09-29T00:00:00Z'));

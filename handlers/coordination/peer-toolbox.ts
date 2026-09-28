@@ -1,5 +1,5 @@
 import { relative, sep } from 'node:path';
-import type { Dirs, MessengerState } from '../../lib.js';
+import { isProcessAlive, type Dirs, type MessengerState } from '../../lib.js';
 import { getActiveAgents } from '../../store/agents.js';
 import { getEffectiveSessionId, normalizeCwd } from '../../store/shared.js';
 import * as taskStore from '../../swarm/task-store.js';
@@ -57,7 +57,7 @@ export function executePeers(state: MessengerState, dirs: Dirs, cwd: string, tas
   const tasks = taskStore.getAllTasks(cwd, sessionId);
   const spawned = listSpawned(cwd, sessionId);
   const peers = getActiveAgents({ ...state, scopeToFolder: false }, dirs)
-    .filter((peer) => !peer.isHuman && belongsToProject(peer.cwd, cwd))
+    .filter((peer) => !peer.isHuman && belongsToProject(peer.cwd, cwd) && isProcessAlive(peer.pid))
     .map((peer) => ({
       name: peer.name,
       agentId: spawned.find((agent) => agent.name === peer.name)?.id ?? peer.name,
