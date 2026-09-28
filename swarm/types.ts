@@ -21,6 +21,9 @@ export interface SwarmTaskVerification {
   exitCode: number;
   patch?: string;
   outputSnippet?: string;
+  commitSha?: string;
+  commit?: string;
+  patchSha?: string;
 }
 
 export interface SwarmTaskDeadEndRecord {

@@ -190,9 +190,11 @@ export function generateBlackboard(cwd: string, sessionId: string): string {
       const verif = t.verification;
       const cmd = verif?.command ?? 'passed';
       const patch = verif?.patch ? ` | Artifact: \`${verif.patch}\`` : '';
+      const commitSha = verif?.commitSha || verif?.commit;
+      const commit = commitSha ? ` | Commit: \`${commitSha.slice(0, 7)}\`` : '';
       lines.push(`- **[${t.id}]** \`${t.title}\``);
       lines.push(
-        `  - Verified by: \`${verif?.verifiedBy ?? t.completed_by ?? 'unknown'}\` at ${verif?.verifiedAt ?? t.completed_at ?? 'unknown'} | Gate: \`${cmd}\` (Exit: 0)${patch}`
+        `  - Verified by: \`${verif?.verifiedBy ?? t.completed_by ?? 'unknown'}\` at ${verif?.verifiedAt ?? t.completed_at ?? 'unknown'} | Gate: \`${cmd}\` (Exit: 0)${patch}${commit}`
       );
       if (t.summary) {
         lines.push(`  - Summary: "${t.summary}"`);

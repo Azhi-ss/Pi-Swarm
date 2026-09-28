@@ -61,6 +61,9 @@ export interface VerifiedPayload {
   patch?: string; // Path to .patch file
   evidence?: SwarmTaskEvidence;
   outputSnippet?: string;
+  commitSha?: string;
+  commit?: string;
+  patchSha?: string;
 }
 
 export interface VerificationFailedPayload {

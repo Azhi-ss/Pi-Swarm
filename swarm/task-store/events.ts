@@ -172,6 +172,9 @@ export function replayEventsToMap(cwd: string, sessionId: string): Map<string, S
             exitCode: payload.exitCode,
             patch: payload.patch,
             outputSnippet: payload.outputSnippet,
+            commitSha: payload.commitSha,
+            commit: payload.commit,
+            patchSha: payload.patchSha,
           };
           delete existing.lease_ttl;
           delete existing.lease_expires_at;

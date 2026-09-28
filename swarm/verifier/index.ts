@@ -102,27 +102,22 @@ export function generatePatch(cwd: string, taskId: string, outputRoot?: string):
       return null;
     }
 
-    const diffRes = spawnSync('git diff HEAD', {
+    // Run git add -N . so untracked files are captured as unified diffs
+    spawnSync('git add -N .', {
+      cwd,
+      shell: true,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'ignore', 'ignore'],
+    });
+
+    const diffRes = spawnSync('git diff HEAD --binary', {
       cwd,
       shell: true,
       encoding: 'utf-8',
       maxBuffer: 10 * 1024 * 1024,
     });
 
-    let diffContent = diffRes.stdout ?? '';
-
-    if (!diffContent.trim()) {
-      // Check untracked files or staged changes
-      const statusRes = spawnSync('git status --porcelain', {
-        cwd,
-        shell: true,
-        encoding: 'utf-8',
-      });
-      const status = statusRes.stdout ?? '';
-      if (status.trim()) {
-        diffContent = `# Modified / untracked files:\n${status}\n`;
-      }
-    }
+    const diffContent = diffRes.stdout ?? '';
 
     if (!diffContent.trim()) {
       return null;
@@ -143,3 +138,5 @@ export function generatePatch(cwd: string, taskId: string, outputRoot?: string):
     return null;
   }
 }
+
+export * from './merge.js';
