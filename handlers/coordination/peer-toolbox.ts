@@ -1,11 +1,17 @@
+import { relative, sep } from 'node:path';
 import type { Dirs, MessengerState } from '../../lib.js';
 import { getActiveAgents } from '../../store/agents.js';
-import { getEffectiveSessionId } from '../../store/shared.js';
+import { getEffectiveSessionId, normalizeCwd } from '../../store/shared.js';
 import * as taskStore from '../../swarm/task-store.js';
 import { findSpawnedAgentByName, listSpawned } from '../../swarm/spawn.js';
 import { getWorktreeInfo } from '../../swarm/worktree/index.js';
 import type { SwarmTask } from '../../swarm/types.js';
 import { result } from '../result.js';
+
+function belongsToProject(candidate: string, cwd: string): boolean {
+  const location = relative(normalizeCwd(cwd), normalizeCwd(candidate));
+  return location === '' || location.startsWith(`.swarm${sep}workspaces${sep}`);
+}
 
 function taskStatus(task: SwarmTask) {
   return {
@@ -24,7 +30,8 @@ export function executeSelfStatus(state: MessengerState, cwd: string) {
   const sessionId = getEffectiveSessionId(cwd, state);
   const record = findSpawnedAgentByName(cwd, sessionId, state.agentName);
   const spawned = record?.status === 'running' ? record : null;
-  const worktree = getWorktreeInfo(spawned?.id ?? state.agentName);
+  const allocation = getWorktreeInfo(spawned?.id ?? state.agentName);
+  const worktree = allocation && belongsToProject(allocation.worktreePath, cwd) ? allocation : null;
   const task = taskStore
     .getAllTasks(cwd, sessionId)
     .find(
@@ -50,7 +57,7 @@ export function executePeers(state: MessengerState, dirs: Dirs, cwd: string, tas
   const tasks = taskStore.getAllTasks(cwd, sessionId);
   const spawned = listSpawned(cwd, sessionId);
   const peers = getActiveAgents({ ...state, scopeToFolder: false }, dirs)
-    .filter((peer) => !peer.isHuman)
+    .filter((peer) => !peer.isHuman && belongsToProject(peer.cwd, cwd))
     .map((peer) => ({
       name: peer.name,
       agentId: spawned.find((agent) => agent.name === peer.name)?.id ?? peer.name,

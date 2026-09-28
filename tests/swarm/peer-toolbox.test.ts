@@ -102,10 +102,16 @@ describe('peer toolbox', () => {
   it('discovers live peers and filters their current staked tasks', async () => {
     const { cwd, dirs, action } = fixture();
     for (const name of ['PeerA', 'PeerB', 'PeerC']) {
-      writeRegistration(dirs, { name, cwd, sessionId });
+      writeRegistration(dirs, {
+        name,
+        cwd: name === 'PeerC' ? path.join(cwd, '.swarm/workspaces/worker-c') : cwd,
+        sessionId,
+      });
     }
     writeRegistration(dirs, { name: 'ExitedPeer', cwd, pid: 2147483647 });
     writeRegistration(dirs, { name: 'Human', cwd, isHuman: true });
+    const { cwd: otherProject } = createMessengerFixture('peer-other-project-');
+    writeRegistration(dirs, { name: 'UnrelatedPeer', cwd: otherProject, sessionId });
     fs.writeFileSync(path.join(dirs.registry, 'broken.json'), '{');
     const task = taskStore.createTask(cwd, sessionId, { title: 'API contract' }, 'test-channel');
     taskStore.stakeTask(cwd, sessionId, task.id, 'PeerB');
@@ -236,6 +242,21 @@ describe('peer toolbox', () => {
   });
 });
 
+describe('peer project isolation', () => {
+  it('does not borrow sandbox metadata from a same-named peer in another project', async () => {
+    const { action } = fixture();
+    const { cwd: otherProject } = createMessengerFixture('peer-other-project-');
+    const otherSandbox = createWorktree(otherProject, 'other-a', 'PeerA');
+    try {
+      const status = JSON.parse((await action({ action: 'status', self: true })).content[0].text);
+      expect(status.sandboxPath).toBeNull();
+      expect(status.runtime).toEqual({ port: null, testPort: null });
+    } finally {
+      removeWorktree(otherProject, otherSandbox);
+    }
+  });
+});
+
 describe('peer toolbox CLI integration', () => {
   it('coordinates through the shared mesh when invoked inside a detached sandbox', async () => {
     const run = promisify(execFile);
@@ -342,6 +363,31 @@ describe('peer toolbox CLI integration', () => {
       expect(fs.existsSync(path.join(dirs.base, 'inbox/cli-b.jsonl'))).toBe(false);
       await expect(cli('send', '../escape', 'Invalid target')).rejects.toMatchObject({ code: 1 });
       expect(fs.existsSync(path.join(sandbox.worktreePath, '.pi/messenger/registry'))).toBe(false);
+
+      // A .git file can also point to separate metadata, without being a linked sandbox.
+      const separateRepo = createTestGitRepo();
+      const metadata = path.join(buildDir, 'separate-git-metadata');
+      await run('git', ['init', '--separate-git-dir', metadata], { cwd: separateRepo.gitDir });
+      const separateDirs = {
+        base: path.join(separateRepo.gitDir, '.pi/messenger'),
+        registry: path.join(separateRepo.gitDir, '.pi/messenger/registry'),
+      };
+      writeRegistration(separateDirs, {
+        name: 'PeerA',
+        cwd: separateRepo.gitDir,
+        sessionId,
+        currentChannel: 'test-channel',
+        sessionChannel: 'test-channel',
+      });
+      const separateStatus = await run(
+        process.execPath,
+        [path.join(buildDir, 'dist/harness/cli.js'), 'status', '--self'],
+        { cwd: separateRepo.gitDir, env, timeout: 10_000 }
+      );
+      expect(JSON.parse(separateStatus.stdout)).toMatchObject({
+        agentName: 'PeerA',
+        currentTask: null,
+      });
     } finally {
       server.kill('SIGTERM');
       await stopped;

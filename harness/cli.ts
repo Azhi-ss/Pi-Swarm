@@ -306,17 +306,23 @@ function resolveProjectRoot(start: string): string {
     const gitPath = path.join(dir, '.git');
     if (fs.existsSync(gitPath) && fs.statSync(gitPath).isFile()) {
       try {
-        const commonDir = execFileSync(
+        const gitDirs = execFileSync(
           'git',
-          ['rev-parse', '--path-format=absolute', '--git-common-dir'],
-          {
-            cwd: dir,
-            encoding: 'utf8',
-            timeout: 2000,
-            stdio: ['ignore', 'pipe', 'ignore'],
-          }
-        ).trim();
-        return path.dirname(commonDir);
+          ['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir'],
+          { cwd: dir, encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }
+        )
+          .trim()
+          .split('\n');
+        // Submodules and separate-Git-directory checkouts are their own project roots.
+        if (gitDirs[0] === gitDirs[1]) return dir;
+        const worktrees = execFileSync('git', ['worktree', 'list', '--porcelain', '-z'], {
+          cwd: dir,
+          encoding: 'utf8',
+          timeout: 2000,
+          stdio: ['ignore', 'pipe', 'ignore'],
+        });
+        const primary = worktrees.split('\0')[0];
+        if (primary.startsWith('worktree ')) return primary.slice('worktree '.length);
       } catch {
         // Fall back to the local root if Git metadata is unavailable.
       }
@@ -401,7 +407,10 @@ async function postAction(jsonBody: string): Promise<void> {
     try {
       const parsed = JSON.parse(body);
       if (parsed.ok && parsed.result?.text) {
-        if (parsed.result.details?.error) {
+        if (
+          parsed.result.details?.error === 'verification_failed' ||
+          parsed.result.details?.error === 'invalid_recipient'
+        ) {
           process.stderr.write(parsed.result.text + '\n');
           process.exit(1);
         }
