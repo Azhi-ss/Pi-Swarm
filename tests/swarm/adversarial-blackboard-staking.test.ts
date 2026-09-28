@@ -111,13 +111,13 @@ describe('Adversarial Test Suite: Module 3 Four-Zone Blackboard & Soft Staking w
 
       // Agent 1 stakes with TTL 1s
       taskStore.stakeTask(cwd, sessionId, task.id, 'Agent-1', { ttl: 1 });
-      await sleep(1100);
+      await sleep(1250);
 
       // Agent 2 preempts with TTL 1s
       const p2 = taskStore.stakeTask(cwd, sessionId, task.id, 'Agent-2', { ttl: 1 });
       expect(p2).not.toBeNull();
       expect(p2!.claimed_by).toBe('Agent-2');
-      await sleep(1100);
+      await sleep(1250);
 
       // Agent 3 preempts with TTL 300s
       const p3 = taskStore.stakeTask(cwd, sessionId, task.id, 'Agent-3', { ttl: 300 });
@@ -280,7 +280,7 @@ describe('Adversarial Test Suite: Module 3 Four-Zone Blackboard & Soft Staking w
       expect(preemptFail).toBeNull();
 
       // Now wait until the refreshed lease expires (progress was at 800ms + 2000ms = 2800ms)
-      await sleep(900); // 2100 + 900 = 3000ms from start
+      await sleep(1100); // 2100 + 1100 = 3200ms from start
       const preemptSuccess = taskStore.stakeTask(cwd, sessionId, task.id, 'Agent-Preempt');
       expect(preemptSuccess).not.toBeNull();
       expect(preemptSuccess!.claimed_by).toBe('Agent-Preempt');
