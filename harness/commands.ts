@@ -33,8 +33,19 @@ export const COMMAND_REGISTRY: CommandSpec[] = [
   {
     cmd: 'status',
     action: 'status',
-    description: 'Show agent status',
+    description: 'Show the four-zone observer card or inspect your own lease',
     flags: ['self'],
+  },
+  {
+    cmd: 'explain',
+    action: 'explain',
+    description: 'Brief verified milestones, active hypotheses and dead ends from BLACKBOARD.md',
+  },
+  {
+    cmd: 'abort',
+    action: 'abort',
+    description: 'Stop this project’s peer process groups and reclaim sandboxes',
+    flags: ['reason'],
   },
   {
     cmd: 'peers',

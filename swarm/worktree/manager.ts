@@ -215,7 +215,7 @@ export function removeWorktree(projectRoot: string, infoOrAgentId: WorktreeInfo 
   // 1. Safely unlink node_modules (must never delete target host node_modules!)
   const targetNodeModules = path.join(worktreePath, 'node_modules');
   try {
-    if (fs.existsSync(targetNodeModules)) {
+    if (worktreePath !== projectRoot && fs.existsSync(targetNodeModules)) {
       const stat = fs.lstatSync(targetNodeModules);
       if (stat.isSymbolicLink()) {
         fs.unlinkSync(targetNodeModules);
@@ -226,7 +226,7 @@ export function removeWorktree(projectRoot: string, infoOrAgentId: WorktreeInfo 
   }
 
   // 2. Remove git worktree if applicable
-  if (isGit && spawnSync) {
+  if (worktreePath !== projectRoot && isGit && spawnSync) {
     try {
       spawnSync(`git worktree remove --force "${worktreePath}"`, {
         cwd: projectRoot,

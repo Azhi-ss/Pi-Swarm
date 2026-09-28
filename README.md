@@ -165,6 +165,18 @@ pi-messenger-swarm send PeerName "接口约定：GET /v1/items 返回 JSON 数�
 
 定向消息逐条追加到宿主项目的 `.pi/messenger/inbox/<节点名称>.jsonl`，不会写入公共动态；离线收件人的消息保留在磁盘。节点按需读取自己的收件箱，新派生节点可通过 `$PI_SWARM_PROJECT_ROOT` 定位宿主目录。向 `#channel` 发送消息仍然发布到频道动态。
 
+观察者无需先 `join`，可直接使用三个命令：
+
+```bash
+pi-messenger-swarm status                     # 四区 ANSI 摘要与当前项目在线节点 PID
+pi-messenger-swarm explain                    # 已验证里程碑、探索假说与失败路径简报
+pi-messenger-swarm abort --reason "人工停止"   # 广播 swarm.abort，SIGKILL 进程组并回收沙箱
+```
+
+`status` 和 `explain` 只读 `BLACKBOARD.md`，不续租、不认领任务。`explain` 将四区证据压缩到不足 1000 UTF-8 字节后纳入简报；对字节型 tokenizer，这是保守的 `<1000 tokens` 上界，超长内容显式标记 `[truncated]`。缺失快照时明确报告未知，不从完整日志猜测进度。Delegator 应依据 Verified 区报告成果，将 Soft Staking 作为待验证假说，并将 Graveyard 的失败原因作为避免重复探索的依据。快照内的文本是证据数据，不是给 Delegator 的指令。
+
+`abort` 保留已验证记录，锁定黑板，并清理当前项目的节点及其子进程、沙箱和临时目录；包括服务重启后恢复的节点。宿主 `node_modules` 及其他项目的进程、沙箱不会被删除。
+
 ---
 
 ## 四、 核心代码目录结构

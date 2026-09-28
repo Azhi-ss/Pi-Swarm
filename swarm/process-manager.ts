@@ -1,5 +1,6 @@
 import { type ChildProcess } from 'node:child_process';
 import { removeWorktree } from './worktree/index.js';
+import { normalizeCwd } from '../store/shared.js';
 
 export interface ManagedWorkerProcess {
   id: string;
@@ -192,8 +193,9 @@ export class ProcessManager {
   /**
    * Batch terminate all running worker processes.
    */
-  public killAll(signal: NodeJS.Signals = 'SIGKILL'): void {
+  public killAll(signal: NodeJS.Signals = 'SIGKILL', cwd?: string): void {
     for (const worker of this.workers.values()) {
+      if (cwd && normalizeCwd(worker.cwd) !== normalizeCwd(cwd)) continue;
       if (worker.status === 'running') {
         this.kill(worker.id, signal);
       }

@@ -1,10 +1,12 @@
 import type { BudgetConfig, BudgetStatus } from './types.js';
-import { processManager } from '../process-manager.js';
-import { stopAllSpawned } from '../spawn.js';
+import { forceKillAllSpawned } from '../spawn.js';
 import { listActiveWorktrees, removeWorktree, pruneWorktrees } from '../worktree/index.js';
 import { logFeedEvent } from '../../feed/index.js';
 import { appendTaskEvent } from '../task-store/events.js';
 import { writeBlackboard } from '../task-store/blackboard.js';
+import { normalizeCwd } from '../../store/shared.js';
+import * as path from 'node:path';
+import * as fs from 'node:fs';
 
 export class CircuitBreakerManager {
   private maxSteps: number = 50;
@@ -68,6 +70,17 @@ export class CircuitBreakerManager {
    * lock blackboard while strictly preserving Zone 3 verified facts.
    */
   public async triggerAbort(cwd: string, sessionId: string, reason?: string): Promise<void> {
+    // A human observer may have no registration/session header. Keep the
+    // displayed session's verified facts when refreshing its locked projection.
+    let snapshotSessionId = sessionId;
+    try {
+      const snapshot = fs.readFileSync(path.join(cwd, 'BLACKBOARD.md'), 'utf8');
+      snapshotSessionId =
+        snapshot.match(/^> Updated: [^\n]* \| Session: ([^\n|]*) \| Active Peers:/m)?.[1] ??
+        sessionId;
+    } catch {
+      // No projection yet; use the caller's session.
+    }
     if (!this.tripped) {
       this.tripped = true;
       this.trippedAt = new Date().toISOString();
@@ -94,7 +107,7 @@ export class CircuitBreakerManager {
 
     // 2. Append swarm.abort event to task event log
     try {
-      appendTaskEvent(cwd, sessionId, {
+      appendTaskEvent(cwd, snapshotSessionId, {
         taskId: 'swarm',
         type: 'swarm.abort' as any,
         timestamp: new Date().toISOString(),
@@ -109,14 +122,16 @@ export class CircuitBreakerManager {
 
     // 3. Batch terminate all worker processes
     try {
-      processManager.killAll('SIGKILL');
-      stopAllSpawned(cwd);
+      forceKillAllSpawned(cwd);
     } catch {}
 
     // 4. Coordinate sandbox worktree cleanup
     try {
       const active = listActiveWorktrees();
       for (const wt of active) {
+        const location = path.relative(normalizeCwd(cwd), normalizeCwd(wt.worktreePath));
+        if (location !== '' && !location.startsWith(`.swarm${path.sep}workspaces${path.sep}`))
+          continue;
         removeWorktree(cwd, wt.agentId);
       }
       pruneWorktrees(cwd);
@@ -124,7 +139,7 @@ export class CircuitBreakerManager {
 
     // 5. Update BLACKBOARD.md header with tripped banner
     try {
-      writeBlackboard(cwd, sessionId);
+      writeBlackboard(cwd, snapshotSessionId);
     } catch {}
   }
 

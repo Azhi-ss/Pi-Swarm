@@ -12,6 +12,7 @@ import { getEffectiveSessionId } from './store/shared.js';
 import { processManager } from './swarm/process-manager.js';
 import { circuitBreaker } from './swarm/circuit-breaker/index.js';
 import { executeSelfStatus, executePeers } from './handlers/coordination/peer-toolbox.js';
+import { executeObserverStatus, executeObserverExplain } from './swarm/handlers/observer.js';
 
 type DeliverFn = (msg: AgentMailMessage) => void;
 type UpdateStatusFn = (ctx: ExtensionContext) => void;
@@ -76,14 +77,29 @@ export async function executeAction(
     return handlers.executeAutoRegisterPath(params.autoRegisterPath);
   }
 
-  if (!state.registered) {
+  const isObserverAction =
+    (group === 'status' && !params.self) ||
+    group === 'explain' ||
+    group === 'abort' ||
+    (group === 'swarm' && op === 'abort');
+  if (!state.registered && !isObserverAction) {
     return handlers.notRegisteredError();
   }
 
   switch (group) {
     case 'status':
-      if (params.self) return executeSelfStatus(state, cwd);
-      return handlers.executeStatus(state, dirs, cwd);
+      return params.self
+        ? executeSelfStatus(state, cwd)
+        : executeObserverStatus(cwd, sessionId, state, dirs);
+
+    case 'explain':
+      return executeObserverExplain(cwd);
+
+    case 'abort': {
+      const reason = params.reason || 'Manual abort requested';
+      await circuitBreaker.triggerAbort(cwd, sessionId, reason);
+      return result(`🛑 Swarm aborted: ${reason}`, { mode: 'swarm.abort', aborted: true, reason });
+    }
 
     case 'list':
       return handlers.executeList(state, dirs, cwd, { stuckThreshold: config?.stuckThreshold });
@@ -154,22 +170,9 @@ export async function executeAction(
       return handlers.executeRename(state, dirs, ctx, params.name, deliverMessage, updateStatus);
 
     case 'swarm': {
-      if (op === 'abort') {
-        const reason = (params.reason as string) || 'Swarm abort requested';
-        await circuitBreaker.triggerAbort(cwd, sessionId, reason);
-        return result(`🛑 Swarm aborted: ${reason}`, {
-          mode: 'swarm.abort',
-          aborted: true,
-          reason,
-        });
-      }
+      if (op === 'abort')
+        return executeAction('abort', params, state, dirs, ctx, deliverMessage, updateStatus);
       return executeSwarmStatus(cwd, params.channel ?? requireChannel(), sessionId);
-    }
-
-    case 'abort': {
-      const reason = (params.reason as string) || 'Manual abort requested';
-      await circuitBreaker.triggerAbort(cwd, sessionId, reason);
-      return result(`🛑 Swarm aborted: ${reason}`, { mode: 'swarm.abort', aborted: true, reason });
     }
 
     case 'ps': {

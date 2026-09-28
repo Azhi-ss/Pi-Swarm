@@ -21,6 +21,8 @@
  *   pi-messenger-swarm send #memory "Remember this"
  *   pi-messenger-swarm feed [--limit 20] [--channel dev]
  *   pi-messenger-swarm status
+ *   pi-messenger-swarm explain
+ *   pi-messenger-swarm abort [--reason "..."]
  *   pi-messenger-swarm list
  *   pi-messenger-swarm whois AgentName
  *   pi-messenger-swarm reserve src/auth/ [--reason task-1]
@@ -492,6 +494,8 @@ async function main(): Promise<void> {
 Usage:
   pi-messenger-swarm join [--channel dev] [--create]
   pi-messenger-swarm status [--self]
+  pi-messenger-swarm explain
+  pi-messenger-swarm abort [--reason "..."]
   pi-messenger-swarm peers [--task <taskId>]
   pi-messenger-swarm list
   pi-messenger-swarm whois <name>
@@ -663,6 +667,10 @@ Environment:
     case 'status': {
       const self = extractFlagBool(args, 'self');
       await postAction(buildAction({ action: 'status', self: self || undefined }));
+      break;
+    }
+    case 'explain': {
+      await postAction(buildAction({ action: 'explain' }));
       break;
     }
     case 'peers': {

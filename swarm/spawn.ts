@@ -736,7 +736,7 @@ export function stopSpawn(cwd: string, id: string): boolean {
 }
 
 export function stopAllSpawned(cwd?: string): void {
-  processManager.killAll('SIGTERM');
+  processManager.killAll('SIGTERM', cwd);
   for (const [id, runtime] of runtimes.entries()) {
     if (cwd && runtime.record.cwd !== cwd) continue;
     if (runtime.detached) {
@@ -768,13 +768,16 @@ export function stopAllSpawned(cwd?: string): void {
 }
 
 export function forceKillAllSpawned(cwd?: string): void {
-  processManager.killAll('SIGKILL');
+  processManager.killAll('SIGKILL', cwd);
   for (const [_id, runtime] of runtimes.entries()) {
     if (cwd && runtime.record.cwd !== cwd) continue;
+    runtime.stopping = true;
     if (runtime.detached) {
       if (runtime.record.pid && isProcessAlive(runtime.record.pid)) {
         killPidGroup(runtime.record.pid, 'SIGKILL');
       }
+      // Recovered runtimes have no ProcessManager registration after a restart.
+      removeWorktree(runtime.record.cwd, runtime.record.id);
       continue;
     }
     if (runtime.process.exitCode !== null) continue;
