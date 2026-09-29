@@ -45,15 +45,17 @@ export function installCriticalDelivery(pi: ExtensionAPI, recipient: () => strin
     inTurn.push(...queued);
     queued = [];
   });
-  pi.on('agent_end', (event) => {
-    const responded = event.messages.some(
-      (m) =>
-        m.role === 'assistant' &&
-        m.stopReason !== 'error' &&
-        m.stopReason !== 'aborted' &&
-        m.content.length > 0
-    );
-    if (!responded) return;
+  pi.on('message_end', (event) => {
+    // This response follows the context that included the incident. Earlier
+    // assistant messages in agent_end's accumulated history are not receipts.
+    const message = event.message;
+    if (
+      message.role !== 'assistant' ||
+      message.stopReason === 'error' ||
+      message.stopReason === 'aborted' ||
+      !message.content.length
+    )
+      return;
     if (inTurn.length) acknowledgeCritical(project, runId, inTurn);
     inTurn = [];
   });

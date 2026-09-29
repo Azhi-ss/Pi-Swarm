@@ -606,6 +606,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
         'task.block',
         'task.unblock',
         'task.create',
+        'spawn',
       ].includes(action)
         ? withRunLock(projectCwd, dispatch)
         : dispatch());

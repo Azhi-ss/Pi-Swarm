@@ -1,3 +1,4 @@
+import { loadConfig } from '../config.js';
 import { preserveCandidate } from './candidates.js';
 import { readRun } from './run-store.js';
 import { messengerDirs, activeRunId } from '../project.js';
@@ -343,6 +344,18 @@ function cleanupTmpDir(tmpDir: string | null) {
   }
 }
 
+function preserveBeforeCleanup(state: SpawnState, sessionId: string): string | undefined {
+  const closing = runtimes.get(state.id);
+  if (closing && activeRunId(state.cwd) === sessionId && !closing.stopping) {
+    try {
+      preserveCandidate(closing.record);
+    } catch (error) {
+      return `Candidate preservation failed; Sandbox retained: ${String(error)}`;
+    }
+  }
+  removeWorktree(state.cwd, state.id);
+}
+
 function attachHandlers(
   proc: ChildProcess,
   state: SpawnState,
@@ -388,17 +401,7 @@ function attachHandlers(
 
   proc.on('error', (err) => {
     cleanupTmpDir(promptTmpDir);
-    const closing = runtimes.get(state.id);
-    let preserved = true;
-    if (closing && activeRunId(state.cwd) === sessionId && !closing.stopping) {
-      try {
-        preserveCandidate(closing.record);
-      } catch (error) {
-        preserved = false;
-        closing.record.error = `Candidate preservation failed; Sandbox retained: ${String(error)}`;
-      }
-    }
-    if (preserved) removeWorktree(state.cwd, state.id);
+    const preservationError = preserveBeforeCleanup(state, sessionId);
     processManager.cleanup(state.id);
     const runtime = runtimes.get(state.id);
     if (!runtime) return;
@@ -408,7 +411,7 @@ function attachHandlers(
       status: 'failed',
       endedAt: new Date().toISOString(),
       exitCode: 1,
-      error: err.message || 'spawn failed',
+      error: [err.message || 'spawn failed', preservationError].filter(Boolean).join('\n'),
     };
     runtime.persisted = true;
     appendEvent(state.cwd, sessionId, {
@@ -427,17 +430,7 @@ function attachHandlers(
 
   proc.on('close', (code, signal) => {
     cleanupTmpDir(promptTmpDir);
-    const closing = runtimes.get(state.id);
-    let preserved = true;
-    if (closing && activeRunId(state.cwd) === sessionId && !closing.stopping) {
-      try {
-        preserveCandidate(closing.record);
-      } catch (error) {
-        preserved = false;
-        closing.record.error = `Candidate preservation failed; Sandbox retained: ${String(error)}`;
-      }
-    }
-    if (preserved) removeWorktree(state.cwd, state.id);
+    const preservationError = preserveBeforeCleanup(state, sessionId);
     removeLiveWorker(state.cwd, state.request.taskId || spawnLiveKey(state.id));
     processManager.cleanup(state.id);
 
@@ -467,9 +460,14 @@ function attachHandlers(
       endedAt,
       exitCode: code ?? (signal ? 1 : undefined),
       error:
-        status === 'failed'
-          ? state.stderr.trim() || runtime.record.error || 'subagent failed'
-          : undefined,
+        [
+          preservationError,
+          status === 'failed'
+            ? state.stderr.trim() || runtime.record.error || 'subagent failed'
+            : undefined,
+        ]
+          .filter(Boolean)
+          .join('\n') || undefined,
     };
 
     runtime.persisted = true;
@@ -501,7 +499,12 @@ export function spawnSubagent(
   const run = readRun(cwd);
   if (run && (run.id !== sessionId || run.status !== 'active' || run.consumedSteps >= run.maxSteps))
     throw new Error('Run is no longer eligible for a peer.');
-  if (run && getRunningSpawnCount(cwd) >= run.concurrency)
+  if (run?.acceptanceOwner && isProcessAlive(run.acceptanceOwner))
+    throw new Error('Overall Goal Acceptance is running; peer admission is paused.');
+  if (
+    run &&
+    getRunningSpawnCount(cwd) >= Math.min(run.concurrency, loadConfig(cwd).maxConcurrentSpawns)
+  )
     throw new Error('Run concurrency limit reached.');
   const id = randomUUID().slice(0, 8);
   const name = request.name?.trim() || generateMemorableName();
@@ -918,6 +921,9 @@ export function reconcileSpawnedAgents(cwd: string, sessionId: string): number {
 }
 
 export function getRunningSpawnCount(cwd?: string): number {
+  const runId = cwd && activeRunId(cwd);
+  if (cwd && runId)
+    return listSpawned(cwd, runId).filter((peer) => peer.pid && isProcessAlive(peer.pid)).length;
   let count = 0;
   for (const runtime of runtimes.values()) {
     if (cwd && runtime.record.cwd !== cwd) continue;

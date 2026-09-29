@@ -1,3 +1,4 @@
+import { forceKillProcessGroup } from '../process-manager.js';
 import { activeRunId } from '../../project.js';
 import { readRun, updateRun, endRun } from '../run-store.js';
 import type { BudgetConfig, BudgetStatus } from './types.js';
@@ -115,6 +116,8 @@ export class CircuitBreakerManager {
     if (this.scope)
       updateRun(cwd, this.scope.runId, (run) => {
         run.status = 'aborted';
+        if (run.acceptancePid) forceKillProcessGroup(run.acceptancePid);
+        delete run.acceptancePid;
       });
 
     // 1. Broadcast swarm.abort feed event to channels

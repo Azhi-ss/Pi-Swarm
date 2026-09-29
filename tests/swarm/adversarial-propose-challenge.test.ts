@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as taskStore from '../../swarm/task-store.js';
 import { proposeTask, challengeTask } from '../../swarm/task-store/commands.js';
@@ -920,32 +920,40 @@ describe('Suite 7: Adversarial — Parameter aliases, blocked task debate, and E
       PI_MESSENGER_CWD: cwd,
     };
 
+    fs.mkdirSync(messengerDir, { recursive: true });
     // 1. Start server
     execFileSync(process.execPath, [cliPath, '--start'], { env, encoding: 'utf-8', cwd });
 
     try {
+      execFileSync(process.execPath, [cliPath, 'run', 'start', '--goal', 'E2E debate'], {
+        env,
+        encoding: 'utf-8',
+        cwd,
+      });
       // 2. Join mesh
-      execFileSync(process.execPath, [cliPath, 'join', '--channel', 'dev'], {
+      execFileSync(process.execPath, [cliPath, 'run', 'join'], {
         env,
         encoding: 'utf-8',
         cwd,
       });
 
       // 3. Propose on non-existent task -> must output error text and not crash
-      const ghostPropOut = execFileSync(
+      const ghostPropOut = spawnSync(
         process.execPath,
         [cliPath, 'propose', 'non-existent-task', 'Ghost plan'],
         { env, encoding: 'utf-8', cwd }
       );
-      expect(ghostPropOut).toContain('Error: task non-existent-task not found');
+      expect(ghostPropOut.status).toBe(1);
+      expect(ghostPropOut.stderr).toContain('Error: task non-existent-task not found');
 
       // 4. Challenge on non-existent task -> must output error text and not crash
-      const ghostChalOut = execFileSync(
+      const ghostChalOut = spawnSync(
         process.execPath,
         [cliPath, 'challenge', 'non-existent-task', 'Ghost objection'],
         { env, encoding: 'utf-8', cwd }
       );
-      expect(ghostChalOut).toContain('Error: task non-existent-task not found');
+      expect(ghostChalOut.status).toBe(1);
+      expect(ghostChalOut.stderr).toContain('Error: task non-existent-task not found');
 
       // 5. Create real task via CLI
       execFileSync(process.execPath, [cliPath, 'task', 'create', '--title', 'E2E Task'], {

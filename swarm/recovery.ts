@@ -1,3 +1,5 @@
+import { forceKillProcessGroup } from './process-manager.js';
+import { loadConfig } from '../config.js';
 import { getCircuitBreaker } from './circuit-breaker/index.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -13,7 +15,7 @@ import { messengerDirs } from '../project.js';
 import { ensureSessionChannel } from '../channel.js';
 import { enqueueCritical } from './notifications.js';
 import { generateAttributionBrief } from './watchdog/brief.js';
-import { executeRun } from './handlers/run.js';
+import { executeRun, readyForAcceptance } from './handlers/run.js';
 
 function notify(cwd: string, runId: string, to: string, id: string, text: string, taskId?: string) {
   enqueueCritical(
@@ -45,10 +47,24 @@ export function recoverRun(cwd: string): void {
     for (const file of fs.readdirSync(history).filter((f) => f.endsWith('.json'))) {
       const ended = readRun(cwd, file.slice(0, -5))!;
       if (ended.status === 'active') continue;
+      if (ended.acceptancePid)
+        updateRun(cwd, ended.id, (current) => {
+          if (current.acceptancePid) forceKillProcessGroup(current.acceptancePid);
+          delete current.acceptancePid;
+          delete current.acceptanceOwner;
+        });
       for (const peer of listSpawned(cwd, ended.id)) stopSpawn(cwd, peer.id);
     }
   const run = readRun(cwd);
   if (!run) return;
+  if (run.acceptanceOwner && !isProcessAlive(run.acceptanceOwner))
+    updateRun(cwd, run.id, (current) => {
+      if (current.acceptanceOwner && !isProcessAlive(current.acceptanceOwner)) {
+        if (current.acceptancePid) forceKillProcessGroup(current.acceptancePid);
+        delete current.acceptancePid;
+        delete current.acceptanceOwner;
+      }
+    });
   if (run.status !== 'active') {
     endRun(cwd, run.id, run.status);
     return;
@@ -140,7 +156,11 @@ export function recoverRun(cwd: string): void {
         h.suspended = true;
         return;
       }
-      if (listSpawned(cwd, run.id).filter(live).length >= current.concurrency) return;
+      if (
+        listSpawned(cwd, run.id).filter(live).length >=
+        Math.min(current.concurrency, loadConfig(cwd).maxConcurrentSpawns)
+      )
+        return;
       if (task.claimed_by)
         appendTaskEvent(cwd, run.id, {
           taskId: task.id,
@@ -202,18 +222,14 @@ export function recoverRun(cwd: string): void {
   if (
     !remaining.length &&
     run.acceptanceCommand &&
-    tasks.length &&
-    tasks.every(
-      (t) => ['done', 'verified', 'archived'].includes(t.status) && t.verification?.exitCode === 0
-    )
+    readyForAcceptance(tasks) &&
+    (!run.acceptanceOwner || !isProcessAlive(run.acceptanceOwner))
   ) {
     const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).trim();
     if (run.acceptance?.head !== head) {
-      try {
-        executeRun(cwd, run.delegator, 'accept', {});
-      } catch {
+      void executeRun(cwd, run.delegator, 'accept', {}).catch(() => {
         /* Evidence is persisted; remains visibly incomplete. */
-      }
+      });
     }
   }
 }

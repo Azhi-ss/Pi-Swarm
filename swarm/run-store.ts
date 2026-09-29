@@ -24,6 +24,8 @@ export interface SwarmRun {
   consumedSteps: number;
   concurrency: number;
   acceptanceCommand?: string;
+  acceptanceOwner?: number;
+  acceptancePid?: number;
   acceptance?: {
     command: string;
     exitCode: number;
@@ -136,10 +138,19 @@ export function updateRun(cwd: string, id: string, update: (run: SwarmRun) => vo
     return run;
   });
 }
-export function endRun(cwd: string, id: string, status: 'completed' | 'aborted'): void {
+export function endRun(
+  cwd: string,
+  id: string,
+  status: 'completed' | 'aborted',
+  validate?: () => void
+): void {
   withRunLock(cwd, () => {
     const run = readRun(cwd, id)!;
-    if (run.status !== 'active' && run.status !== status) return;
+    if (run.status !== 'active' && run.status !== status) {
+      if (validate) throw new Error('Run stopped during overall acceptance.');
+      return;
+    }
+    validate?.();
     run.status = status;
     run.endedAt = new Date().toISOString();
     atomicWrite(runPath(cwd, id), run);

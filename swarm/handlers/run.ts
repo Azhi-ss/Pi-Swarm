@@ -1,8 +1,10 @@
-import { execFileSync } from 'node:child_process';
+import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
+import { isProcessAlive } from '../../lib.js';
+import type { SwarmTask } from '../types.js';
 import { readRun, startRun, updateRun, endRun } from '../run-store.js';
 import { listSpawned } from '../spawn.js';
 import { getAllTasks, writeBlackboard } from '../task-store.js';
-import { runVerification } from '../verifier/index.js';
+import { forceKillProcessGroup } from '../process-manager.js';
 import { result } from '../result.js';
 import type { MessengerActionParams } from '../../action-types.js';
 
@@ -18,7 +20,7 @@ export function runStatus(cwd: string) {
   };
 }
 
-export function executeRun(
+export async function executeRun(
   cwd: string,
   name: string,
   operation: string,
@@ -49,35 +51,96 @@ export function executeRun(
         'Overall Goal Acceptance is incomplete: no acceptance command was recorded at run start.'
       );
     const tasks = getAllTasks(cwd, run.id);
-    if (
-      !tasks.length ||
-      tasks.some(
-        (t) =>
-          !['done', 'verified', 'archived'].includes(t.status) || t.verification?.exitCode !== 0
-      )
-    )
+    if (!readyForAcceptance(tasks))
       throw new Error('Overall Goal Acceptance is incomplete: tasks still lack verified evidence.');
     if (listSpawned(cwd, run.id).length)
       throw new Error('Overall Goal Acceptance waits for live peers to exit.');
     const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).trim();
-    const checked = runVerification(cwd, command);
-    updateRun(cwd, run.id, (current) => {
-      current.acceptance = {
-        command,
-        exitCode: checked.exitCode,
-        output: (checked.stdout + checked.stderr).slice(-16000),
-        checkedAt: new Date().toISOString(),
-        head,
-      };
-    });
-    if (!checked.passed)
-      throw new Error(
-        `Overall Goal Acceptance failed (exit ${checked.exitCode}): ${checked.stderr || checked.stdout}`
-      );
-    if (execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).trim() !== head)
-      throw new Error('Project changed during overall acceptance; reverify.');
-    endRun(cwd, run.id, 'completed');
+    let evaluator: ChildProcess | undefined;
+    try {
+      const checked = await new Promise<{ exitCode: number; output: string }>((resolve, reject) => {
+        try {
+          updateRun(cwd, run.id, (current) => {
+            if (current.status !== 'active') throw new Error('Run is no longer active.');
+            if (current.acceptanceOwner && isProcessAlive(current.acceptanceOwner))
+              throw new Error('Overall Goal Acceptance is already running.');
+            if (listSpawned(cwd, run.id).length)
+              throw new Error('Live peers must exit before acceptance.');
+            if (current.acceptancePid) forceKillProcessGroup(current.acceptancePid);
+            // Admission and the evaluator PID are published under one lock,
+            // allowing even another service to stop the complete process group.
+            evaluator = spawn(command, {
+              cwd,
+              shell: true,
+              detached: process.platform !== 'win32',
+              stdio: ['ignore', 'pipe', 'pipe'],
+            });
+            current.acceptanceOwner = process.pid;
+            current.acceptancePid = evaluator.pid;
+          });
+        } catch (error) {
+          reject(error);
+          return;
+        }
+        const child = evaluator!;
+        let output = '';
+        const collect = (chunk: Buffer | string) => {
+          output = (output + chunk.toString()).slice(-16000);
+        };
+        child.stdout?.on('data', collect);
+        child.stderr?.on('data', collect);
+        const timeout = setTimeout(() => {
+          if (child.pid) forceKillProcessGroup(child.pid);
+        }, 60_000);
+        child.once('error', (error) => {
+          clearTimeout(timeout);
+          resolve({ exitCode: 1, output: output + error.message });
+        });
+        child.once('close', (code) => {
+          clearTimeout(timeout);
+          resolve({ exitCode: code ?? 1, output });
+        });
+      });
+      const observed = updateRun(cwd, run.id, (current) => {
+        current.acceptance = { command, ...checked, checkedAt: new Date().toISOString(), head };
+        delete current.acceptancePid;
+      });
+      if (observed.status !== 'active') throw new Error('Run stopped during overall acceptance.');
+      if (checked.exitCode !== 0)
+        throw new Error(
+          `Overall Goal Acceptance failed (exit ${checked.exitCode}): ${checked.output}`
+        );
+      endRun(cwd, run.id, 'completed', () => {
+        if (
+          execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).trim() !== head ||
+          JSON.stringify(getAllTasks(cwd, run.id)) !== JSON.stringify(tasks)
+        )
+          throw new Error('Project changed during overall acceptance; reverify.');
+      });
+    } finally {
+      if (evaluator)
+        updateRun(cwd, run.id, (current) => {
+          delete current.acceptanceOwner;
+          delete current.acceptancePid;
+        });
+    }
     return result(JSON.stringify(readRun(cwd, run.id)), { mode: 'run.accept' });
   }
   throw new Error(`Unknown run operation: ${operation}`);
+}
+
+/** Pruned alternatives are terminal, not failed prerequisites for another solution. */
+export function readyForAcceptance(tasks: SwarmTask[]): boolean {
+  return (
+    tasks.some(
+      (task) =>
+        ['done', 'verified', 'archived'].includes(task.status) && task.verification?.exitCode === 0
+    ) &&
+    tasks.every(
+      (task) =>
+        task.status === 'dead_end' ||
+        (['done', 'verified', 'archived'].includes(task.status) &&
+          task.verification?.exitCode === 0)
+    )
+  );
 }

@@ -76,6 +76,7 @@ describe('COMMAND_REGISTRY ↔ router.ts drift', () => {
     [...ROUTER_SRC.matchAll(/case ['"]([^'"]+)['"]\s*:/g)].map((m) => m[1])
   );
   routerCases.add('join');
+  routerCases.add('run');
   routerCases.add('autoRegisterPath');
 
   it('every registry top-level action group exists in router.ts', () => {

@@ -23,7 +23,7 @@ pi-messenger-swarm run join
 pi-messenger-swarm run status
 ```
 
-Only one active run is admitted per Project. New sessions explicitly join it; observers can inspect it without joining. An unfinished run with no live workers is `Awaiting Handoff`, retaining its slot. The `--verify` overall acceptance command is optional at startup. If supplied, successful task evidence plus the overall check automatically completes and archives the run. Without an evaluator, overall acceptance remains visibly incomplete. `run accept` retries the recorded evaluator; it never substitutes a verbal sign-off. A task passing is not itself overall success.
+Only one active run is admitted per Project. New sessions explicitly join it; observers can inspect it without joining. An unfinished run with no live workers is `Awaiting Handoff`, retaining its slot. The `--verify` overall acceptance command is optional at startup. If supplied, verified solution evidence plus the overall check automatically completes and archives the run; pruned alternative hypotheses do not block acceptance. The evaluator runs asynchronously so other Projects retain responsive emergency control. Without an evaluator, overall acceptance remains visibly incomplete. `run accept` retries the recorded evaluator; it never substitutes a verbal sign-off. A task passing is not itself overall success.
 
 Run identity, accounting, handoff history and acceptance evidence are persisted. `abort` affects the selected Project only and prevents replacement. A later run has a new identity and cannot consume old-run messages. `--stop` stops the shared service; use project-scoped `abort` for emergency control of a run.
 
@@ -50,3 +50,14 @@ Restoring never modifies the host or makes a Verified fact. Conflicts remain in 
 ## Runtime acceptance tests
 
 `npx vitest run tests/runtime/installed.test.ts` builds and packs the release, installs with `--omit=dev` and normal scripts, and exercises the installed CLI/service in independent Git repositories. Real installed Pi processes use a deterministic local model-provider fixture at the external model API boundary; delivery and recovery are not replaced by mocked internal callbacks. This is runtime-hardening evidence, not evidence of the separate Bohrium scientific benchmark's score or ranking.
+
+### Verification record — 2026-09-29
+
+The installed-runtime suite passed all 13 scenarios using Node 24.13.0 and Pi Host/TUI 0.87.0. The release tarball was installed with `npm install --omit=dev` and normal scripts enabled in a separate temporary installation.
+
+- The installed extension loaded, and the service accepted commands from independent target repositories; missing Project Context failed explicitly.
+- Same-name peers in shared storage retained separate tasks and inboxes. Concurrent run starts admitted one owner, and restart retained its identity and budget.
+- Real Pi recipients produced `HANDLED_VERIFICATION` and `HANDLED_ALL_DEAD`. A model error after receiving an incident left it enqueued until a later successful response; ordinary mail did not trigger a turn.
+- A real successor recovered tracked and new source files after a peer crash and service restart. Failed reverification left the host unchanged; an evolved-host conflict required resolution and successful reverification before integration.
+- Three replacement startup failures suspended only the affected task. Independent services shared admission limits for ordinary spawns and automatic recovery; exhausted budgets and abort prevented replacement.
+- All-pruned tasks remained unfinished. A verified alternative passed asynchronous overall acceptance and archived the run. Another Project's abort remained responsive, and aborting the evaluator's own run stopped its delayed writes before a later run began.

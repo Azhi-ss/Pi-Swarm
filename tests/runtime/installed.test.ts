@@ -95,7 +95,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (cli) await command('--stop').catch(() => {});
-  fs.rmSync(root, { recursive: true, force: true });
+  fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 it('loads the production extension and starts its installed service in a separate project', async () => {
@@ -124,45 +124,62 @@ it('rejects a missing target even when another project has already used the serv
   ).toContain('Goal');
 });
 
-it('keeps same-name peers and their tasks separate in shared storage', async () => {
-  const other = path.join(root, 'other');
-  fs.mkdirSync(other);
-  await run('git', ['init'], other);
-  await run(
-    'git',
-    [
-      '-c',
-      'user.email=test@example.test',
-      '-c',
-      'user.name=Test',
-      'commit',
-      '--allow-empty',
-      '-m',
-      'initial',
-    ],
-    other
-  );
-  const shared = path.join(root, 'shared');
-  const scoped = (cwd: string, name: string, ...args: string[]) =>
-    exec(process.execPath, [cli, ...args], {
-      cwd,
-      env: { ...env, PI_MESSENGER_DIR: shared, PI_AGENT_NAME: name },
-      timeout: 15_000,
-    });
-  await scoped(project, 'Same', 'run', 'start', '--goal', 'Storage project A');
-  await scoped(project, 'Same', 'join');
-  await scoped(project, 'Same', 'task', 'create', '--title', 'Only project A');
-  await scoped(other, 'Same', 'run', 'start', '--goal', 'Storage project B');
-  await scoped(other, 'Same', 'join');
-  expect((await scoped(other, 'Same', 'task', 'list')).stdout).not.toContain('Only project A');
-  await scoped(project, 'Receiver', 'join');
-  await scoped(project, 'Same', 'send', 'Receiver', 'private contract A');
-  expect((await scoped(project, 'Receiver', 'inbox')).stdout).toContain('private contract A');
-  expect((await scoped(other, 'Same', 'inbox')).stdout).not.toContain('private contract A');
-  expect((await scoped(project, 'Same', 'task', 'list')).stdout).toContain('Only project A');
-  await scoped(project, 'Same', 'abort');
-  await scoped(other, 'Same', 'abort');
-});
+it.each(['custom', 'global'])(
+  'keeps same-name peers and their tasks separate in %s shared storage',
+  async (storageMode) => {
+    const targetProject = storageMode === 'custom' ? project : path.join(root, 'global-project');
+    if (targetProject !== project) {
+      fs.mkdirSync(targetProject);
+      await run('git', ['init'], targetProject);
+    }
+    const other = path.join(root, storageMode === 'custom' ? 'other' : 'global-other');
+    fs.mkdirSync(other);
+    await run('git', ['init'], other);
+    await run(
+      'git',
+      [
+        '-c',
+        'user.email=test@example.test',
+        '-c',
+        'user.name=Test',
+        'commit',
+        '--allow-empty',
+        '-m',
+        'initial',
+      ],
+      other
+    );
+    const shared = path.join(root, 'shared');
+    const scoped = (cwd: string, name: string, ...args: string[]) =>
+      exec(process.execPath, [cli, ...args], {
+        cwd,
+        env: {
+          ...env,
+          PI_MESSENGER_DIR: storageMode === 'custom' ? shared : '',
+          PI_MESSENGER_GLOBAL: storageMode === 'global' ? '1' : '0',
+          PI_AGENT_NAME: name,
+        },
+        timeout: 15_000,
+      });
+    await scoped(targetProject, 'Same', 'run', 'start', '--goal', 'Storage project A');
+    await scoped(targetProject, 'Same', 'join');
+    await scoped(targetProject, 'Same', 'task', 'create', '--title', 'Only project A');
+    await scoped(other, 'Same', 'run', 'start', '--goal', 'Storage project B');
+    await scoped(other, 'Same', 'join');
+    expect((await scoped(other, 'Same', 'task', 'list')).stdout).not.toContain('Only project A');
+    await scoped(targetProject, 'Receiver', 'join');
+    await scoped(targetProject, 'Same', 'send', 'Receiver', 'private contract A');
+    expect((await scoped(targetProject, 'Receiver', 'inbox')).stdout).toContain(
+      'private contract A'
+    );
+    expect((await scoped(other, 'Same', 'inbox')).stdout).not.toContain('private contract A');
+    expect((await scoped(targetProject, 'Same', 'task', 'list')).stdout).toContain(
+      'Only project A'
+    );
+    await scoped(targetProject, 'Same', 'abort');
+    await scoped(other, 'Same', 'abort');
+  }
+);
 
 it('admits one run, shares its tasks across sessions, and retains unfinished ownership after restart', async () => {
   const starts = await Promise.allSettled([
@@ -206,10 +223,27 @@ it('admits one run, shares its tasks across sessions, and retains unfinished own
 it('actively delivers a verification failure to a real installed Pi host, while ordinary messages stay pull-based', async () => {
   await command('run', 'join');
   const requests: string[] = [];
+  let rejectIncident = true;
+  let sawRejectedIncident = false;
   const provider = createHttpServer(async (req, res) => {
     let raw = '';
     for await (const chunk of req) raw += chunk;
     requests.push(raw);
+    if (rejectIncident && raw.includes('[Verification Failed]')) {
+      sawRejectedIncident = true;
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          error: {
+            message: 'deliberate model error after incident',
+            type: 'invalid_request_error',
+          },
+        })
+      );
+      return;
+    }
+    const pauseForIncident =
+      raw.includes('pause for critical regression') && !raw.includes('[Verification Failed]');
     const content = raw.includes('All-Dead Attribution Brief')
       ? 'HANDLED_ALL_DEAD'
       : raw.includes('[Verification Failed]')
@@ -217,8 +251,26 @@ it('actively delivers a verification failure to a real installed Pi host, while 
         : 'READY';
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     for (const choice of [
-      { delta: { role: 'assistant', content }, finish_reason: null },
-      { delta: {}, finish_reason: 'stop' },
+      {
+        delta: pauseForIncident
+          ? {
+              role: 'assistant',
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'pause',
+                  type: 'function',
+                  function: {
+                    name: 'bash',
+                    arguments: JSON.stringify({ command: 'sleep 3', timeout: 10 }),
+                  },
+                },
+              ],
+            }
+          : { role: 'assistant', content },
+        finish_reason: null,
+      },
+      { delta: {}, finish_reason: pauseForIncident ? 'tool_calls' : 'stop' },
     ]) {
       res.write(
         'data: ' +
@@ -294,9 +346,32 @@ it('actively delivers a verification failure to a real installed Pi host, while 
     expect(requests).toHaveLength(calls);
     await peer('task', 'create', '--title', 'Verify critical delivery');
     await peer('task', 'claim', 'task-1');
+    const priorOutput = output.length;
+    host.stdin.write(
+      JSON.stringify({ type: 'prompt', message: 'pause for critical regression' }) + '\n'
+    );
+    await vi.waitFor(() => expect(output.slice(priorOutput)).toContain('tool_execution_start'), {
+      timeout: 10_000,
+    });
     await expect(
       peer('task', 'done', 'task-1', 'test', '--verify', 'node -e "process.exit(7)"')
     ).rejects.toMatchObject({ code: 1 });
+    await vi.waitFor(
+      () => {
+        expect(sawRejectedIncident).toBe(true);
+        expect(output.slice(priorOutput)).toContain('agent_end');
+      },
+      { timeout: 10_000 }
+    );
+    expect(JSON.parse((await peer('notifications')).stdout)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ to: 'Receiver', taskId: 'task-1', status: 'enqueued' }),
+      ])
+    );
+    rejectIncident = false;
+    host.stdin.write(
+      JSON.stringify({ type: 'prompt', message: 'retry the pending critical incident' }) + '\n'
+    );
     await vi.waitFor(
       () => expect(output.includes('HANDLED_VERIFICATION'), output.slice(-2500)).toBe(true),
       { timeout: 15_000 }
@@ -668,3 +743,183 @@ it('persists an exhausted budget and physically stops peers without creating rep
     await new Promise<void>((resolve) => provider.close(() => resolve()));
   }
 }, 35_000);
+
+it('accepts a verified solution alongside a pruned hypothesis without blocking another project abort', async () => {
+  const marker = path.join(project, '.pi', 'acceptance-started');
+  const acceptance = `node -e "require('fs').writeFileSync('.pi/acceptance-started','yes'); setTimeout(()=>{},3500)"`;
+  const started = JSON.parse(
+    (
+      await command(
+        'run',
+        'start',
+        '--goal',
+        'Alternative hypothesis succeeds',
+        '--verify',
+        acceptance
+      )
+    ).stdout
+  );
+  await command('run', 'join');
+  await command('task', 'create', '--title', 'Pruned alternative');
+  await command('task', 'claim', 'task-1');
+  for (let attempt = 0; attempt < 3; attempt++)
+    await expect(
+      command('task', 'done', 'task-1', 'fails', '--verify', 'node -e "process.exit(7)"')
+    ).rejects.toMatchObject({ code: 1 });
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  expect(fs.existsSync(marker)).toBe(false);
+  expect(JSON.parse((await command('run', 'status')).stdout).status).toBe('active');
+  await command('task', 'create', '--title', 'Successful alternative');
+  await command('task', 'claim', 'task-2');
+  await command('task', 'done', 'task-2', 'verified', '--verify', 'node -e "process.exit(0)"');
+  const other = path.join(root, 'other');
+  const otherCommand = (...args: string[]) => run(process.execPath, [cli, ...args], other);
+  await otherCommand('run', 'start', '--goal', 'Emergency stop remains responsive');
+  await vi.waitFor(() => expect(fs.existsSync(marker)).toBe(true), { timeout: 10_000 });
+  const before = Date.now();
+  await otherCommand('abort');
+  expect(Date.now() - before).toBeLessThan(2000);
+  await vi.waitFor(
+    async () =>
+      expect(JSON.parse((await command('run', 'show', started.id)).stdout).status).toBe(
+        'completed'
+      ),
+    { timeout: 12_000 }
+  );
+  expect(JSON.parse((await command('run', 'show', started.id)).stdout).acceptance.exitCode).toBe(0);
+}, 30_000);
+
+it('shares spawn admission between two installed service processes', async () => {
+  const socket = createServer();
+  await new Promise<void>((resolve) => socket.listen(0, '127.0.0.1', resolve));
+  const secondPort = (socket.address() as { port: number }).port;
+  await new Promise<void>((resolve) => socket.close(() => resolve()));
+  const second = (...args: string[]) =>
+    exec(process.execPath, [cli, ...args], {
+      cwd: project,
+      env: {
+        ...env,
+        PI_MESSENGER_PORT: String(secondPort),
+        PI_MESSENGER_LOG: path.join(root, 'second.log'),
+      },
+      timeout: 20_000,
+    });
+  // Hold model requests so accepted peers remain alive during both admissions.
+  const provider = createHttpServer(async (req, _res) => {
+    for await (const _chunk of req) {
+    }
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  fs.writeFileSync(
+    path.join(env.PI_CODING_AGENT_DIR!, 'models.json'),
+    JSON.stringify({
+      providers: {
+        fixture: {
+          baseUrl: `http://127.0.0.1:${(provider.address() as { port: number }).port}/v1`,
+          api: 'openai-completions',
+          apiKey: 'fixture',
+          models: [{ id: 'fixture', contextWindow: 128000, maxTokens: 1024 }],
+        },
+      },
+    })
+  );
+  await second('--start');
+  try {
+    await command('run', 'start', '--goal', 'Cross-process admission', '--concurrency', '1');
+    await Promise.all([command('run', 'join'), second('run', 'join')]);
+    const admissions = await Promise.allSettled([
+      command('spawn', '--model', 'fixture/fixture', 'Hold first worker'),
+      second('spawn', '--model', 'fixture/fixture', 'Hold second worker'),
+    ]);
+    expect(admissions.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(
+      (admissions.find((r) => r.status === 'rejected') as PromiseRejectedResult).reason.stderr
+    ).toContain('concurrency');
+
+    await command('abort');
+    const recoveryRun = JSON.parse(
+      (await command('run', 'start', '--goal', 'Bound duplicate recovery', '--concurrency', '3'))
+        .stdout
+    );
+    await command('run', 'join');
+    await command('task', 'create', '--title', 'First recovery');
+    await command('task', 'create', '--title', 'Second recovery');
+    await command(
+      'spawn',
+      '--task-id',
+      'task-1',
+      '--model',
+      'fixture/fixture',
+      'Wait for first recovery'
+    );
+    await second(
+      'spawn',
+      '--task-id',
+      'task-2',
+      '--model',
+      'fixture/fixture',
+      'Wait for second recovery'
+    );
+    const eventsFile = path.join(project, '.pi/messenger/agents', `${recoveryRun.id}.jsonl`);
+    const events = () =>
+      fs
+        .readFileSync(eventsFile, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+    const originalPids = events()
+      .filter((event) => event.agent.pid)
+      .map((event) => event.agent.pid);
+    expect(originalPids).toHaveLength(2);
+    fs.writeFileSync(
+      path.join(project, '.pi/pi-messenger.json'),
+      JSON.stringify({ maxConcurrentSpawns: 1 })
+    );
+    for (const pid of originalPids) process.kill(pid, 'SIGKILL');
+    await vi.waitFor(
+      () => expect(events().filter((event) => event.type === 'spawned')).toHaveLength(3),
+      { timeout: 12_000 }
+    );
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    expect(events().filter((event) => event.type === 'spawned')).toHaveLength(3);
+    const handoffs = JSON.parse((await command('run', 'status')).stdout).handoffs;
+    expect(Object.values(handoffs).filter((h: any) => h.successor)).toHaveLength(1);
+    expect(Object.values(handoffs).every((h: any) => h.failures === 0)).toBe(true);
+  } finally {
+    await command('abort').catch(() => {});
+    await second('--stop').catch(() => {});
+    fs.rmSync(path.join(project, '.pi/pi-messenger.json'), { force: true });
+    provider.closeAllConnections();
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
+  }
+}, 30_000);
+
+it('kills the selected run evaluator before a later run can be affected', async () => {
+  const marker = path.join(project, '.pi', 'abort-acceptance-started');
+  const late = path.join(project, 'late-evaluator-write.txt');
+  const acceptance = `node -e "require('fs').writeFileSync('.pi/abort-acceptance-started','yes');setTimeout(()=>require('fs').writeFileSync('late-evaluator-write.txt','wrong run'),2200)"`;
+  const started = JSON.parse(
+    (await command('run', 'start', '--goal', 'Stop evaluator', '--verify', acceptance)).stdout
+  );
+  await command('run', 'join');
+  await command('task', 'create', '--title', 'Verified prerequisite');
+  await command('task', 'claim', 'task-1');
+  await command('task', 'done', 'task-1', 'verified', '--verify', 'node -e "process.exit(0)"');
+  await vi.waitFor(() => expect(fs.existsSync(marker)).toBe(true), {
+    timeout: 10_000,
+    interval: 50,
+  });
+  await command('abort');
+  const later = JSON.parse(
+    (await command('run', 'start', '--goal', 'No writes from previous evaluator')).stdout
+  );
+  await new Promise((resolve) => setTimeout(resolve, 2500));
+  expect(fs.existsSync(late)).toBe(false);
+  expect(JSON.parse((await command('run', 'show', started.id)).stdout).status).toBe('aborted');
+  expect(JSON.parse((await command('run', 'status')).stdout)).toMatchObject({
+    id: later.id,
+    status: 'active',
+  });
+  await command('abort');
+}, 20_000);
