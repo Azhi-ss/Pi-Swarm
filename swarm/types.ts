@@ -115,6 +115,7 @@ export interface SwarmSummary {
 }
 
 export interface SpawnRequest {
+  model?: string;
   role?: string;
   persona?: string;
   objective?: string;
@@ -144,6 +145,8 @@ export interface SpawnedAgent {
   sessionId?: string;
   pid?: number;
   worktreePath?: string;
+  baseCommit?: string;
+  stopRequested?: boolean;
   port?: number;
   testPort?: number;
 }

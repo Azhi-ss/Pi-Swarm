@@ -1,3 +1,4 @@
+import { messengerDirs } from '../../project.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { SwarmTask } from '../types.js';
@@ -46,7 +47,7 @@ function isWorkerDead(cwd: string, sessionId: string, claimant: string): boolean
   }
 
   // 3. Check messenger registry
-  const regPath = path.join(cwd, '.pi', 'messenger', 'registry', `${claimant}.json`);
+  const regPath = path.join(messengerDirs(cwd).registry, `${claimant}.json`);
   if (fs.existsSync(regPath)) {
     try {
       const reg = JSON.parse(fs.readFileSync(regPath, 'utf-8'));
@@ -58,7 +59,7 @@ function isWorkerDead(cwd: string, sessionId: string, claimant: string): boolean
     }
   } else {
     // If registry folder exists and has other registrations, this agent departed
-    const registryDir = path.join(cwd, '.pi', 'messenger', 'registry');
+    const registryDir = messengerDirs(cwd).registry;
     if (fs.existsSync(registryDir)) {
       try {
         const others = fs.readdirSync(registryDir).filter((f) => f.endsWith('.json'));

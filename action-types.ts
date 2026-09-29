@@ -7,6 +7,10 @@ export interface TaskEvidence {
 export interface MessengerActionParams {
   // Action
   action?: string;
+  goal?: string;
+  runId?: string;
+  maxSteps?: number;
+  concurrency?: number;
 
   // Task IDs
   id?: string;

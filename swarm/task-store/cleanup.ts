@@ -1,3 +1,4 @@
+import { messengerDirs } from '../../project.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { isProcessAlive } from '../../lib.js';
@@ -10,7 +11,7 @@ import { replayTasks } from './events.js';
  * Returns: true (active), false (crashed/dead), null (unknown/no registry)
  */
 function isAgentActive(cwd: string, agentName: string): boolean | null {
-  const regPath = path.join(cwd, '.pi', 'messenger', 'registry', `${agentName}.json`);
+  const regPath = path.join(messengerDirs(cwd).registry, `${agentName}.json`);
   if (!fs.existsSync(regPath)) return null;
 
   try {
@@ -27,7 +28,7 @@ function isAgentActive(cwd: string, agentName: string): boolean | null {
  * Returns the number of claims that were cleaned up.
  */
 export function cleanupStaleTaskClaims(cwd: string, sessionId: string): number {
-  const registryDir = path.join(cwd, '.pi', 'messenger', 'registry');
+  const registryDir = messengerDirs(cwd).registry;
   if (!fs.existsSync(registryDir)) return 0;
 
   // Use replayTasks directly instead of getTasks to avoid triggering cleanup recursively

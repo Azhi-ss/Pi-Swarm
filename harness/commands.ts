@@ -23,6 +23,62 @@ export interface CommandSpec {
 }
 
 export const COMMAND_REGISTRY: CommandSpec[] = [
+  {
+    cmd: 'run start',
+    action: 'run.start',
+    description: 'Start the Project’s single active run',
+    flags: ['goal', 'verify', 'max-steps', 'concurrency'],
+  },
+  { cmd: 'run join', action: 'run.join', description: 'Join the selected Project’s active run' },
+  {
+    cmd: 'run status',
+    action: 'run.status',
+    description: 'Inspect active run ownership and limits',
+  },
+  {
+    cmd: 'run show',
+    action: 'run.show',
+    description: 'Read an archived or active run',
+    args: ['word'],
+  },
+  {
+    cmd: 'run accept',
+    action: 'run.accept',
+    description: 'Retry the recorded overall acceptance command',
+  },
+  { cmd: 'inbox', action: 'inbox', description: 'Read ordinary peer messages on demand' },
+  {
+    cmd: 'notifications',
+    action: 'notifications',
+    description: 'Inspect critical delivery evidence',
+  },
+  {
+    cmd: 'candidate list',
+    action: 'candidate.list',
+    description: 'List unverified recovery candidates',
+    flags: ['task'],
+  },
+  {
+    cmd: 'candidate show',
+    action: 'candidate.show',
+    description: 'Inspect unverified candidate data',
+    args: ['word'],
+    flags: ['task'],
+  },
+  {
+    cmd: 'candidate restore',
+    action: 'candidate.restore',
+    description: 'Restore into your own Sandbox for reverification',
+    args: ['word'],
+    flags: ['task', 'include'],
+  },
+  { cmd: 'handoff status', action: 'handoff.status', description: 'Inspect task handoff history' },
+  {
+    cmd: 'handoff resume',
+    action: 'handoff.resume',
+    description: 'Explicitly resume a suspended task after repairing startup',
+    args: ['word'],
+  },
   // ── Coordination ──────────────────────────────────────────────────────────
   {
     cmd: 'join',

@@ -92,5 +92,12 @@
   "overrides": {
     "brace-expansion": "5.0.6"
   },
-  "packageManager": "pnpm@11.6.0"
+  "packageManager": "pnpm@11.6.0",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "0.87.x",
+    "@earendil-works/pi-tui": "0.87.x"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
 }

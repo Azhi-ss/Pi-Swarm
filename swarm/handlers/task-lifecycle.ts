@@ -19,7 +19,7 @@ import {
   computePatchSha,
 } from '../verifier/index.js';
 import { getWorktreeInfo } from '../worktree/index.js';
-import { circuitBreaker } from '../circuit-breaker/index.js';
+import { getCircuitBreaker } from '../circuit-breaker/index.js';
 
 /**
  * Ensures BLACKBOARD.md is excluded from Git status without dirtying .gitignore or tracked files.
@@ -53,7 +53,7 @@ export function taskClaim(
   channelId: string,
   sessionId: string
 ) {
-  if (circuitBreaker.isTripped()) {
+  if (getCircuitBreaker(cwd, sessionId).isTripped()) {
     return result('Error: Circuit breaker is tripped. Task mutations are locked.', {
       mode: 'task.claim',
       error: 'circuit_broken',
@@ -132,7 +132,7 @@ export function taskStake(
   channelId: string,
   sessionId: string
 ) {
-  if (circuitBreaker.isTripped()) {
+  if (getCircuitBreaker(cwd, sessionId).isTripped()) {
     return result('Error: Circuit breaker is tripped. Task mutations are locked.', {
       mode: 'task.stake',
       error: 'circuit_broken',
@@ -282,9 +282,23 @@ export function taskDone(
   const evidence = params.evidence as SwarmTaskEvidence | undefined;
 
   // If agent operates in an active worktree sandbox, execute verification & generate patch in that worktree
-  const worktree = getWorktreeInfo(state.agentName);
+  const peer = listSpawned(cwd, sessionId, true).find(
+    (p) => p.name === state.agentName && p.status === 'running'
+  );
+  const allocation = getWorktreeInfo(peer?.id || state.agentName);
+  const worktree =
+    allocation &&
+    (allocation.worktreePath === cwd ||
+      allocation.worktreePath.startsWith(path.join(cwd, '.swarm/workspaces') + path.sep))
+      ? allocation
+      : undefined;
+  const recoveredPath = peer?.worktreePath;
   const targetCwd =
-    worktree?.worktreePath && fs.existsSync(worktree.worktreePath) ? worktree.worktreePath : cwd;
+    worktree?.worktreePath && fs.existsSync(worktree.worktreePath)
+      ? worktree.worktreePath
+      : recoveredPath && fs.existsSync(recoveredPath)
+        ? recoveredPath
+        : cwd;
 
   // Determine verify command: params.verify (task-level override) or task.verify_command or detectProjectTestCommand(targetCwd)
   const verifyCommand =

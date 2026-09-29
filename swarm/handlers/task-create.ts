@@ -5,7 +5,7 @@ import { result } from '../result.js';
 import { logFeedEvent } from '../../feed/index.js';
 import * as taskStore from '../task-store.js';
 import { summaryLine } from './_utils.js';
-import { circuitBreaker } from '../circuit-breaker/index.js';
+import { getCircuitBreaker } from '../circuit-breaker/index.js';
 
 export function taskCreate(
   params: MessengerActionParams,
@@ -14,7 +14,7 @@ export function taskCreate(
   channelId: string,
   sessionId: string
 ) {
-  if (circuitBreaker.isTripped()) {
+  if (getCircuitBreaker(cwd, sessionId).isTripped()) {
     return result('Error: Circuit breaker is tripped. Task creation is locked.', {
       mode: 'task.create',
       error: 'circuit_broken',

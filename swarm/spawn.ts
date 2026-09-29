@@ -1,9 +1,12 @@
+import { preserveCandidate } from './candidates.js';
+import { readRun } from './run-store.js';
+import { messengerDirs, activeRunId } from '../project.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
 import { generateMemorableName } from '../lib.js';
 import { createProgress, parseJsonlLine, updateProgress } from './progress.js';
@@ -18,7 +21,7 @@ import {
   getWorktreeInfo,
 } from './worktree/index.js';
 import { processManager, forceKillProcessGroup } from './process-manager.js';
-import { circuitBreaker } from './circuit-breaker/index.js';
+import { getCircuitBreaker } from './circuit-breaker/index.js';
 
 interface SpawnRuntime {
   process: ChildProcess;
@@ -185,7 +188,7 @@ function buildSwarmProtocol(): string {
     '6. Ephemeral Focus & Clean Turn Completion: Once your milestone is verified, record the evidence and artifacts in the task record (`pi-messenger-swarm task done <taskId> "Evidence & summary"`), release held resources, and cleanly complete your turn. Do not spin or idle; next-generation peers will continue from the blackboard state.',
     '7. Self-Inspection: Run `pi-messenger-swarm status --self` to inspect your agentId, sandboxPath, currentTask, leaseExpiresIn (seconds), verificationAttempts, remainingRetries, lastError, and runtime port/testPort slots. Use the injected PORT, TEST_PORT and TMPDIR for work in your sandbox.',
     '8. Peer Discovery: Run `pi-messenger-swarm peers` to discover active peers, or `pi-messenger-swarm peers --task <taskId>` to find peers with a live claim on that task. Agree on interfaces before changing shared contracts.',
-    '9. Direct Signaling: Use `pi-messenger-swarm send <peer> "Contract or coordination message"` to append to that peer\'s .pi/messenger/inbox/<peer>.jsonl. Read your own inbox at $PI_SWARM_PROJECT_ROOT/.pi/messenger/inbox/$PI_AGENT_NAME.jsonl between milestones (a missing file means no messages yet). Messages are pull-based; check the inbox and feed yourself.',
+    '9. Direct Signaling: Use `pi-messenger-swarm send <peer> "Contract or coordination message"` to append to that peer\'s .pi/messenger/inbox/<peer>.jsonl. Read your own inbox with `pi-messenger-swarm inbox` (or $PI_SWARM_INBOX) between milestones (a missing file means no messages yet). Messages are pull-based; check the inbox and feed yourself.',
   ].join('\n');
 }
 
@@ -356,8 +359,8 @@ function attachHandlers(
     for (const line of lines) {
       const event = parseJsonlLine(line);
       if (!event) continue;
-      if (event.type === 'tool_execution_end') {
-        circuitBreaker.recordStep(state.name, (event as any).toolName, {
+      if (event.type === 'tool_execution_end' && !activeRunId(state.cwd)) {
+        getCircuitBreaker(state.cwd, sessionId).recordStep(state.name, (event as any).toolName, {
           cwd: state.cwd,
           sessionId,
         });
@@ -385,7 +388,17 @@ function attachHandlers(
 
   proc.on('error', (err) => {
     cleanupTmpDir(promptTmpDir);
-    removeWorktree(state.cwd, state.id);
+    const closing = runtimes.get(state.id);
+    let preserved = true;
+    if (closing && activeRunId(state.cwd) === sessionId && !closing.stopping) {
+      try {
+        preserveCandidate(closing.record);
+      } catch (error) {
+        preserved = false;
+        closing.record.error = `Candidate preservation failed; Sandbox retained: ${String(error)}`;
+      }
+    }
+    if (preserved) removeWorktree(state.cwd, state.id);
     processManager.cleanup(state.id);
     const runtime = runtimes.get(state.id);
     if (!runtime) return;
@@ -414,7 +427,17 @@ function attachHandlers(
 
   proc.on('close', (code, signal) => {
     cleanupTmpDir(promptTmpDir);
-    removeWorktree(state.cwd, state.id);
+    const closing = runtimes.get(state.id);
+    let preserved = true;
+    if (closing && activeRunId(state.cwd) === sessionId && !closing.stopping) {
+      try {
+        preserveCandidate(closing.record);
+      } catch (error) {
+        preserved = false;
+        closing.record.error = `Candidate preservation failed; Sandbox retained: ${String(error)}`;
+      }
+    }
+    if (preserved) removeWorktree(state.cwd, state.id);
     removeLiveWorker(state.cwd, state.request.taskId || spawnLiveKey(state.id));
     processManager.cleanup(state.id);
 
@@ -472,9 +495,14 @@ export function spawnSubagent(
   sessionId: string,
   inheritedChannel?: string
 ): SpawnedAgent {
-  if (circuitBreaker.isTripped()) {
+  if (getCircuitBreaker(cwd, sessionId).isTripped()) {
     throw new Error('Circuit breaker is tripped: spawn rejected');
   }
+  const run = readRun(cwd);
+  if (run && (run.id !== sessionId || run.status !== 'active' || run.consumedSteps >= run.maxSteps))
+    throw new Error('Run is no longer eligible for a peer.');
+  if (run && getRunningSpawnCount(cwd) >= run.concurrency)
+    throw new Error('Run concurrency limit reached.');
   const id = randomUUID().slice(0, 8);
   const name = request.name?.trim() || generateMemorableName();
   const startedAt = new Date().toISOString();
@@ -483,7 +511,7 @@ export function spawnSubagent(
   let prompt: string;
   let role: string;
   let objective: string;
-  let agentFileModel: string | undefined;
+  let agentFileModel: string | undefined = request.model;
 
   if (request.agentFile) {
     const filePath = path.resolve(cwd, request.agentFile);
@@ -513,6 +541,9 @@ export function spawnSubagent(
     name,
     role,
     model: agentFileModel,
+    baseCommit: worktree.isGitWorktree
+      ? execFileSync('git', ['rev-parse', 'HEAD'], { cwd: effectiveCwd, encoding: 'utf8' }).trim()
+      : undefined,
     persona: request.persona,
     objective,
     context: request.context,
@@ -539,6 +570,9 @@ export function spawnSubagent(
     ...process.env,
     PI_AGENT_NAME: name,
     PI_SWARM_PROJECT_ROOT: cwd,
+    PI_SWARM_RUN_ID: activeRunId(cwd) || '',
+    PI_SWARM_INBOX: path.join(messengerDirs(cwd).base, 'inbox', `${name}.jsonl`),
+    PI_SWARM_PEER_PID: '',
     ...(inheritedChannel ? { PI_MESSENGER_CHANNEL: inheritedChannel } : {}),
     TMPDIR: worktree.tmpDir,
     PORT: String(worktree.port),
@@ -593,6 +627,7 @@ export function spawnSubagent(
       startedAt,
       status: 'running',
       timeoutMs: 600_000,
+      deferTimeoutCleanup: !!run,
     },
     proc,
     () => {
@@ -700,11 +735,19 @@ function killPidGroup(pid: number, signal: NodeJS.Signals = 'SIGTERM'): void {
   }
 }
 
-export function stopSpawn(cwd: string, id: string): boolean {
-  processManager.kill(id, 'SIGTERM');
+export function stopSpawn(cwd: string, id: string, recoverable = false): boolean {
   const runtime = runtimes.get(id);
   if (!runtime) return false;
   if (runtime.record.cwd !== cwd) return false;
+  runtime.record.stopRequested = !recoverable;
+  appendEvent(cwd, runtime.record.sessionId || '', {
+    id,
+    type: 'progress',
+    timestamp: new Date().toISOString(),
+    agent: { stopRequested: !recoverable },
+  });
+  if (recoverable) preserveCandidate(runtime.record);
+  processManager.kill(id, 'SIGTERM');
   // Detached runtimes use PID liveness checks
   if (runtime.detached) {
     if (runtime.record.pid && isProcessAlive(runtime.record.pid)) {
@@ -854,6 +897,7 @@ export function reconcileSpawnedAgents(cwd: string, sessionId: string): number {
     // This covers harness crash-restart: agent process already exited but the
     // close handler never fired because runtimes was lost.
     if (agent.pid && !isProcessAlive(agent.pid)) {
+      if (activeRunId(cwd) === sessionId && !agent.stopRequested) preserveCandidate(agent);
       removeWorktree(cwd, agent.id);
       appendEvent(cwd, sessionId, {
         id: agent.id,

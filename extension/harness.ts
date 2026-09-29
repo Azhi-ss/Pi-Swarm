@@ -47,11 +47,11 @@ export function resolveCli(): CliResolution {
   if (distCli) {
     const __dirname = fileURLToPath(new URL('.', import.meta.url));
     // cwd is the package root (parent of dist/)
-    return { command: 'node', prefixArgs: [], cliPath: distCli, cwd: join(__dirname, '..') };
+    return { command: 'node', prefixArgs: [], cliPath: distCli, cwd: process.cwd() };
   }
   const sourceCli = getSourceCliPath();
   const projectRoot = getProjectRoot();
-  return { command: 'npx', prefixArgs: ['tsx'], cliPath: sourceCli, cwd: projectRoot };
+  return { command: 'npx', prefixArgs: ['tsx'], cliPath: sourceCli, cwd: process.cwd() };
 }
 
 /** Resolve the project root for cwd. */
@@ -122,8 +122,8 @@ export function createHarnessServer(messengerDir: string): HarnessServerControll
       ...(restEnv as Record<string, string>),
       // Always override so the harness server writes to the same
       // directory as the extension, even though the harness is spawned
-      // with cwd: projectRoot (the pi-messenger repo).
-      PI_MESSENGER_DIR: messengerDir,
+      // with cwd: process.cwd() (the pi-messenger repo).
+      ...(process.env.PI_MESSENGER_DIR ? { PI_MESSENGER_DIR: process.env.PI_MESSENGER_DIR } : {}),
       PI_MESSENGER_CWD: process.cwd(),
     };
 

@@ -1,3 +1,4 @@
+import { messengerDirs } from '../../project.js';
 import type { SwarmTask, SwarmSummary } from '../types.js';
 import { replayTasks, replayAllTasks, appendTaskEvent } from './events.js';
 import { readTaskSpec } from './persistence.js';
@@ -25,7 +26,7 @@ export function _resetCleanupThrottle(cwd?: string, sessionId?: string): void {
  * Returns: true (active), false (crashed/dead), null (unknown/no registry)
  */
 function isAgentActive(cwd: string, agentName: string): boolean | null {
-  const regPath = path.join(cwd, '.pi', 'messenger', 'registry', `${agentName}.json`);
+  const regPath = path.join(messengerDirs(cwd).registry, `${agentName}.json`);
   if (!fs.existsSync(regPath)) return null;
 
   try {
@@ -51,7 +52,7 @@ export function isLeaseExpired(task: SwarmTask, now: number = Date.now()): boole
  * Returns the number of claims that were cleaned up.
  */
 function cleanupStaleTaskClaims(cwd: string, sessionId: string): number {
-  const registryDir = path.join(cwd, '.pi', 'messenger', 'registry');
+  const registryDir = messengerDirs(cwd).registry;
   const hasRegistry = fs.existsSync(registryDir);
 
   // Use replayTasks directly instead of getTasks to avoid triggering cleanup recursively

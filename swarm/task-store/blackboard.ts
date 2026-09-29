@@ -1,9 +1,10 @@
+import { messengerDirs } from '../../project.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { SwarmTask } from '../types.js';
 import { getAllTasks, getSummaryForTasks } from './queries.js';
 import { isProcessAlive } from '../../lib.js';
-import { circuitBreaker } from '../circuit-breaker/index.js';
+import { getCircuitBreaker } from '../circuit-breaker/index.js';
 
 interface ActivePeerInfo {
   name: string;
@@ -13,7 +14,7 @@ interface ActivePeerInfo {
 }
 
 function getActivePeers(cwd: string, tasks: SwarmTask[]): ActivePeerInfo[] {
-  const registryDir = path.join(cwd, '.pi', 'messenger', 'registry');
+  const registryDir = messengerDirs(cwd).registry;
   if (!fs.existsSync(registryDir)) return [];
 
   const peers: ActivePeerInfo[] = [];
@@ -85,7 +86,7 @@ export function generateBlackboard(cwd: string, sessionId: string): string {
   lines.push(
     `> Progress: Total: ${summary.total} | Goals: ${goalTasks.length} | Staked: ${stakedTasks.length} | Verified: ${verifiedTasks.length} | Dead Ends: ${graveyardTasks.length}`
   );
-  const budget = circuitBreaker.getStatus();
+  const budget = getCircuitBreaker(cwd, sessionId).getStatus();
   if (budget.isTripped) {
     lines.push(
       `> 🛑 **CIRCUIT BREAKER TRIPPED**: ${budget.consumedSteps}/${budget.maxSteps} steps exceeded | Blackboard LOCKED | Swarm Aborted`

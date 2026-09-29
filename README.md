@@ -219,3 +219,7 @@ Pi-Swarm 遵循严谨的测试驱动开发与法医级验证规范：
 - **原型基础**：感谢 **Tom X Nguyen ([monotykamary](https://github.com/monotykamary))** 最初在 `pi-messenger-swarm` 上打下的文件协作基础。
 
 本项目采用 [MIT 许可证](LICENSE) 开源。
+
+## 安装、运行隔离与故障恢复
+
+发布包的 Pi Host 前置条件、独立项目安装、`run start/join/status`、主动通知、候选补丁恢复和自动接力见 [运行时指南](docs/runtime-hardening.md)。

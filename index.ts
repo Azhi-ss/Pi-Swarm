@@ -1,3 +1,11 @@
+import { installCriticalDelivery } from './extension/critical-notifications.js';
+import {
+  messengerDirs,
+  resolveProject,
+  configuredStorage,
+  selectStorage,
+  activeRunId,
+} from './project.js';
 /**
  * Pi Messenger Extension
  *
@@ -42,12 +50,11 @@ import { installShellAlias, createHarnessServer, resolveCli } from './extension/
 import { handleReservationEnforcement } from './extension/reservation.js';
 import { createMentionAutocompleteProvider } from './extension/mention-autocomplete.js';
 import { handleHashInput } from './extension/handle-input.js';
-import { syncDirsFromServer } from './extension/sync-dirs.js';
 import { splitCliArgs } from './harness/commands.js';
 import { handleSessionShutdown } from './extension/shutdown.js';
 import { processManager } from './swarm/process-manager.js';
 import { WatchdogService } from './swarm/watchdog/index.js';
-import { circuitBreaker } from './swarm/circuit-breaker/index.js';
+import { getCircuitBreaker } from './swarm/circuit-breaker/index.js';
 
 let overlayTui: TUI | null = null;
 let overlayHandle: OverlayHandle | null = null;
@@ -57,7 +64,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
   const config: MessengerConfig = loadConfig(process.cwd());
 
   const state: MessengerState = {
-    agentName: '',
+    agentName: process.env.PI_AGENT_NAME || `Peer${process.pid}`,
     registered: false,
     reservations: [],
     chatHistory: new Map(),
@@ -81,19 +88,16 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     joinedChannels: [],
   };
 
+  installCriticalDelivery(pi, () => process.env.PI_AGENT_NAME || state.agentName);
+
   const nameTheme = { theme: config.nameTheme, customWords: config.nameWords };
 
   function getMessengerDirs(): Dirs {
-    const baseDir =
-      process.env.PI_MESSENGER_DIR ||
-      (process.env.PI_MESSENGER_GLOBAL === '1'
-        ? join(getAgentDir(), 'messenger')
-        : join(process.cwd(), '.pi/messenger'));
-    return {
-      base: baseDir,
-      registry: join(baseDir, 'registry'),
-    };
+    const project = resolveProject(process.cwd(), process.env.PI_SWARM_PROJECT_ROOT);
+    if (configuredStorage()) selectStorage(project, configuredStorage()!);
+    return messengerDirs(project);
   }
+
   const dirs = getMessengerDirs();
 
   const deliverMessage = createDeliverMessage({
@@ -111,6 +115,14 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
   });
 
   function syncContextSession(ctx: ExtensionContext): void {
+    const selected = getMessengerDirs();
+    if (selected.base !== dirs.base) {
+      Object.assign(dirs, selected);
+      state.registered = false;
+      state.currentChannel = '';
+      state.sessionChannel = '';
+      state.joinedChannels = [];
+    }
     if (!state.registered) return;
 
     const rebound = store.rebindContextSession(state, dirs, ctx);
@@ -416,18 +428,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     // Start the harness server even without auto-register —
     // the model needs it for CLI actions regardless.
     harnessServer.start();
-    // Sync the extension's dirs to the running server's dataDir so that
-    // direct filesystem reads (e.g. # autocomplete candidates) always use
-    // the same registry as the harness server.
-    //
-    // Background: the harness server is a singleton process that may have
-    // been started by a different pi session with a different working
-    // directory or PI_MESSENGER_DIR.  The extension computes its own
-    // dirs at startup from process.cwd(), which may not match the server's
-    // dataDir — causing getActiveAgents() to read an empty (or wrong)
-    // registry and silently return no peers for autocomplete.
-    // Best-effort: errors are absorbed inside syncDirsFromServer.
-    void syncDirsFromServer(dirs);
+    Object.assign(dirs, getMessengerDirs());
 
     if (!shouldAutoRegister) {
       return;
@@ -525,7 +526,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
           // the CLI then receives intact without requiring shell quoting.
           const cliArgs = splitCliArgs(rest);
           const result = await pi.exec(command, [...prefixArgs, cliPath, ...cliArgs], {
-            cwd: cliCwd,
+            cwd,
           });
           const output = [result.stdout, result.stderr].filter(Boolean).join('\n').trim();
           if (output) {
@@ -555,11 +556,16 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
   });
 
   pi.on('tool_call', async (event, ctx) => {
-    circuitBreaker.recordStep(state.agentName || 'main', event.toolName, {
-      cwd: process.cwd(),
-      sessionId: state.contextSessionId,
+    const cwd = resolveProject(ctx.cwd, process.env.PI_SWARM_PROJECT_ROOT);
+    if (process.env.PI_SWARM_RUN_ID && process.env.PI_SWARM_RUN_ID !== activeRunId(cwd))
+      return { block: true, reason: 'This Swarm Run is no longer active.' };
+    const sessionId = getEffectiveSessionId(cwd, state);
+    const breaker = getCircuitBreaker(cwd, sessionId);
+    breaker.recordStep(state.agentName || 'main', event.toolName, {
+      cwd,
+      sessionId,
     });
-    if (circuitBreaker.isTripped()) {
+    if (breaker.isTripped()) {
       return {
         block: true,
         reason:

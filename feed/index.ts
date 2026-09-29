@@ -1,3 +1,4 @@
+import { messengerDirs } from '../project.js';
 /**
  * Pi Messenger - Activity Feed
  *
@@ -75,7 +76,7 @@ const feedCache = new Map<string, FeedCacheEntry>();
 
 function unifiedChannelPath(cwd: string, channelId: string): string {
   // Construct a minimal Dirs-like structure for path resolution
-  const base = path.join(cwd, '.pi', 'messenger');
+  const base = messengerDirs(cwd).base;
   return channelPath({ base, registry: '' }, channelId);
 }
 
@@ -198,7 +199,7 @@ export function appendFeedEvent(cwd: string, event: FeedEvent, channelId: string
     const eventLine = JSON.stringify(sanitized);
 
     // Use the channel module's append function for unified storage
-    const baseDir = path.join(cwd, '.pi', 'messenger');
+    const baseDir = messengerDirs(cwd).base;
     const mockDirs: Dirs = { base: baseDir, registry: '' };
     appendChannelEventLine(mockDirs, channelId, eventLine);
 
@@ -260,7 +261,7 @@ export function getFeedLineCount(cwd: string, channelId: string): number {
 }
 
 export function pruneFeed(cwd: string, maxEvents: number, channelId: string): void {
-  const baseDir = path.join(cwd, '.pi', 'messenger');
+  const baseDir = messengerDirs(cwd).base;
   const mockDirs: Dirs = { base: baseDir, registry: '' };
   pruneChannelEvents(mockDirs, channelId, maxEvents);
   invalidateFeedCache(cwd, channelId);

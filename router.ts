@@ -1,3 +1,11 @@
+import { readRun, updateRun } from './swarm/run-store.js';
+import { listCandidates, restoreCandidate } from './swarm/candidates.js';
+import { listSpawned, stopSpawn } from './swarm/spawn.js';
+import { getTask } from './swarm/task-store.js';
+import { listCritical } from './swarm/notifications.js';
+import { executeRun } from './swarm/handlers/run.js';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 /**
  * Pi Messenger action router (swarm-first).
  */
@@ -10,7 +18,7 @@ import { result } from './swarm/result.js';
 import { executeSpawn, executeSwarmStatus, executeTask } from './swarm/handlers.js';
 import { getEffectiveSessionId } from './store/shared.js';
 import { processManager } from './swarm/process-manager.js';
-import { circuitBreaker } from './swarm/circuit-breaker/index.js';
+import { getCircuitBreaker } from './swarm/circuit-breaker/index.js';
 import { executeSelfStatus, executePeers } from './handlers/coordination/peer-toolbox.js';
 import { executeObserverStatus, executeObserverExplain } from './swarm/handlers/observer.js';
 
@@ -42,6 +50,36 @@ export async function executeAction(
   const op = dotIndex > 0 ? action.slice(dotIndex + 1) : null;
   const cwd = ctx.cwd ?? process.cwd();
   const sessionId = getEffectiveSessionId(cwd, state);
+  const run = readRun(cwd);
+  const readOnly = [
+    'status',
+    'explain',
+    'peers',
+    'list',
+    'whois',
+    'feed',
+    'inbox',
+    'notifications',
+    'task.list',
+    'task.show',
+    'task.ready',
+    'task.blackboard',
+    'spawn.list',
+    'spawn.history',
+    'run.status',
+    'run.show',
+    'candidate.list',
+    'candidate.show',
+    'handoff.status',
+    'blackboard',
+  ];
+  if (
+    run &&
+    getCircuitBreaker(cwd, run.id).isTripped() &&
+    !readOnly.includes(action) &&
+    !['abort', 'swarm.abort'].includes(action)
+  )
+    throw new Error('Swarm Run is stopped or its budget is exhausted.');
 
   // Helper to get current channel or throw
   function requireChannel(): string {
@@ -52,7 +90,11 @@ export async function executeAction(
     return channel;
   }
 
-  if (group === 'join') {
+  if (group === 'run' && op === 'join' && !readRun(cwd))
+    throw new Error('No active Swarm Run; use run start --goal.');
+  if (group === 'run' && op !== 'join')
+    return executeRun(cwd, state.agentName, op || 'status', params);
+  if (group === 'join' || (group === 'run' && op === 'join')) {
     return handlers.executeJoin(
       state,
       dirs,
@@ -80,6 +122,7 @@ export async function executeAction(
   const isObserverAction =
     (group === 'status' && !params.self) ||
     group === 'explain' ||
+    group === 'notifications' ||
     group === 'abort' ||
     (group === 'swarm' && op === 'abort');
   if (!state.registered && !isObserverAction) {
@@ -97,7 +140,7 @@ export async function executeAction(
 
     case 'abort': {
       const reason = params.reason || 'Manual abort requested';
-      await circuitBreaker.triggerAbort(cwd, sessionId, reason);
+      await getCircuitBreaker(cwd, sessionId).triggerAbort(cwd, sessionId, reason);
       return result(`🛑 Swarm aborted: ${reason}`, { mode: 'swarm.abort', aborted: true, reason });
     }
 
@@ -130,6 +173,65 @@ export async function executeAction(
         config?.swarmEventsInFeed ?? true,
         params.channel
       );
+
+    case 'handoff': {
+      const run = readRun(cwd);
+      if (!run) throw new Error('No active run.');
+      if (op === 'resume') {
+        const id = params.id || '';
+        const task = getTask(cwd, sessionId, id);
+        if (!task || !['todo', 'staked', 'in_progress'].includes(task.status))
+          throw new Error('Task is not eligible for handoff.');
+        updateRun(cwd, run.id, (r) => {
+          const h = r.handoffs[id];
+          if (!h?.suspended) throw new Error('Task handoff is not suspended.');
+          h.suspended = false;
+          h.failures = 0;
+          h.successor = undefined;
+          h.errors.push(`Explicitly resumed by ${state.agentName} at ${new Date().toISOString()}`);
+        });
+      }
+      return result(JSON.stringify(readRun(cwd)!.handoffs), { mode: 'handoff' });
+    }
+    case 'candidate': {
+      const candidates = listCandidates(cwd, sessionId).filter(
+        (c) => !params.taskId || c.taskId === params.taskId
+      );
+      if (!op || op === 'list')
+        return result(JSON.stringify(candidates), { mode: 'candidate.list' });
+      const candidate =
+        params.id === 'latest' ? candidates[0] : candidates.find((c) => c.id === params.id);
+      if (!candidate) throw new Error('Handoff Candidate not found in this run.');
+      if (op === 'show')
+        return result(JSON.stringify(candidate) + '\n' + fs.readFileSync(candidate.patch, 'utf8'), {
+          mode: 'candidate.show',
+        });
+      if (op !== 'restore') throw new Error('Unknown candidate operation.');
+      const task = getTask(cwd, sessionId, candidate.taskId);
+      if (
+        !task ||
+        !['staked', 'in_progress'].includes(task.status) ||
+        task.claimed_by !== state.agentName
+      )
+        throw new Error('Claim the eligible task before restoring its candidate.');
+      const peer = listSpawned(cwd, sessionId).find((p) => p.name === state.agentName);
+      if (!peer?.worktreePath) throw new Error('Candidate restoration requires your own Sandbox.');
+      restoreCandidate(candidate, peer.worktreePath, params.paths);
+      return result(
+        'Candidate restored as UNVERIFIED. Inspect, verify, and submit through task done.',
+        { mode: 'candidate.restore', candidate }
+      );
+    }
+    case 'notifications':
+      return result(JSON.stringify(listCritical(cwd, params.runId || sessionId)), {
+        mode: 'notifications',
+      });
+    case 'inbox': {
+      const file = path.join(dirs.base, 'inbox', `${state.agentName}.jsonl`);
+      return result(fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : 'No messages.', {
+        mode: 'inbox',
+      });
+    }
 
     case 'send':
       return handlers.executeSend(
@@ -178,7 +280,7 @@ export async function executeAction(
     case 'ps': {
       const operation = op ?? 'list';
       if (operation === 'list') {
-        const workers = processManager.list(params.all === true);
+        const workers = processManager.list(params.all === true).filter((w) => w.cwd === cwd);
         if (workers.length === 0) {
           return result('No running swarm workers.', { mode: 'ps.list', workers: [] });
         }
@@ -201,6 +303,10 @@ export async function executeAction(
             error: 'missing_id',
           });
         }
+        const owned =
+          listSpawned(cwd, sessionId, true).some((p) => p.id === id) ||
+          processManager.list(true).some((p) => p.id === id && p.cwd === cwd);
+        if (!owned) throw new Error('Worker not found in this Project and run.');
         const maxLines = typeof params.lines === 'number' ? params.lines : 100;
         const logs = processManager.getLogs(id, maxLines);
         const text = `=== Worker ${id} Logs ===\n--- STDOUT ---\n${logs.stdout || '(no stdout)'}\n--- STDERR ---\n${logs.stderr || '(no stderr)'}`;
@@ -214,7 +320,11 @@ export async function executeAction(
             error: 'missing_id',
           });
         }
-        const stopped = processManager.kill(id);
+        const owned =
+          listSpawned(cwd, sessionId, true).some((p) => p.id === id) ||
+          processManager.list(true).some((p) => p.id === id && p.cwd === cwd);
+        if (!owned) throw new Error('Worker not found in this Project and run.');
+        const stopped = stopSpawn(cwd, id) || processManager.kill(id);
         if (!stopped) {
           return result(`Error: worker ${id} not found`, {
             mode: 'ps.kill',

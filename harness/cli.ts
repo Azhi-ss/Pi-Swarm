@@ -57,6 +57,9 @@ import * as http from 'node:http';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+import { resolveProject, messengerDirs, configuredStorage } from '../project.js';
+let selectedProject: string | undefined;
+
 const PORT = Number(process.env.PI_MESSENGER_PORT ?? 9877);
 const HOST = '127.0.0.1';
 const BASE_URL = `http://${HOST}:${PORT}`;
@@ -182,20 +185,14 @@ function findCallerPid(): number | undefined {
 function readRegistrationName(): string | undefined {
   try {
     const projectRoot = resolveProjectRoot(process.cwd());
-    const registryDir = path.join(projectRoot, '.pi', 'messenger', 'registry');
+    const registryDir = messengerDirs(projectRoot).registry;
     if (!fs.existsSync(registryDir)) return undefined;
 
-    const callerPid = findCallerPid();
+    const callerPid = Number(process.env.PI_SWARM_PEER_PID) || findCallerPid();
 
     // Read all registration files
     const files = fs.readdirSync(registryDir).filter((f) => f.endsWith('.json'));
     if (files.length === 0) return undefined;
-
-    // If only one registration (common for coordinator), just use it
-    if (files.length === 1) {
-      const reg = JSON.parse(fs.readFileSync(path.join(registryDir, files[0]), 'utf-8'));
-      return reg.name || undefined;
-    }
 
     // Multiple registrations: match by PID
     if (callerPid) {
@@ -209,21 +206,7 @@ function readRegistrationName(): string | undefined {
       }
     }
 
-    // Fallback: most recently modified registration (most likely active)
-    let bestName: string | undefined;
-    let bestMtime = 0;
-    for (const file of files) {
-      try {
-        const stat = fs.statSync(path.join(registryDir, file));
-        if (stat.mtimeMs > bestMtime) {
-          bestMtime = stat.mtimeMs;
-          bestName = file.replace(/\.json$/, '');
-        }
-      } catch {
-        // Skip
-      }
-    }
-    return bestName;
+    return undefined;
   } catch {
     return undefined;
   }
@@ -237,7 +220,7 @@ function readRegistrationName(): string | undefined {
 function readSessionIdFromFile(): string | undefined {
   try {
     const projectRoot = resolveProjectRoot(process.cwd());
-    const sessionFilePath = path.join(projectRoot, '.pi', 'messenger', 'session-id');
+    const sessionFilePath = path.join(messengerDirs(projectRoot).base, 'session-id');
     if (fs.existsSync(sessionFilePath)) {
       const id = fs.readFileSync(sessionFilePath, 'utf-8').trim();
       if (id) return id;
@@ -250,6 +233,9 @@ function readSessionIdFromFile(): string | undefined {
 
 function agentHeaders(): Record<string, string> {
   const headers: Record<string, string> = {};
+  const storage = configuredStorage();
+  if (storage) headers['x-storage-root'] = path.resolve(storage);
+  if (process.env.PI_SWARM_RUN_ID) headers['x-run-id'] = process.env.PI_SWARM_RUN_ID;
 
   // Identity resolution strategy (in priority order):
   // 1. Explicit env var (PI_AGENT_NAME) — set by parent on spawn for subagents
@@ -266,10 +252,10 @@ function agentHeaders(): Record<string, string> {
   }
 
   // PID-based identity as fallback (for pi sessions that don't set PI_AGENT_NAME)
-  const callerPid = findCallerPid();
+  const callerPid = Number(process.env.PI_SWARM_PEER_PID) || findCallerPid();
   if (callerPid) headers['x-caller-pid'] = String(callerPid);
 
-  const sessionId = readSessionIdFromFile();
+  const sessionId = process.env.PI_SWARM_RUN_ID || readSessionIdFromFile();
   if (sessionId) headers['x-session-id'] = sessionId;
 
   // Send the project root (not the raw cwd) so the harness server
@@ -301,42 +287,10 @@ async function isUp(): Promise<boolean> {
  * (e.g., dist/) the CLI was invoked from.
  */
 function resolveProjectRoot(start: string): string {
-  const swarmRoot = process.env.PI_SWARM_PROJECT_ROOT?.trim();
-  if (swarmRoot) return path.resolve(swarmRoot);
-  let dir = start;
-  for (let i = 0; i < 20; i++) {
-    const gitPath = path.join(dir, '.git');
-    if (fs.existsSync(gitPath) && fs.statSync(gitPath).isFile()) {
-      try {
-        const gitDirs = execFileSync(
-          'git',
-          ['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir'],
-          { cwd: dir, encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }
-        )
-          .trim()
-          .split('\n');
-        // Submodules and separate-Git-directory checkouts are their own project roots.
-        if (gitDirs[0] === gitDirs[1]) return dir;
-        const worktrees = execFileSync('git', ['worktree', 'list', '--porcelain', '-z'], {
-          cwd: dir,
-          encoding: 'utf8',
-          timeout: 2000,
-          stdio: ['ignore', 'pipe', 'ignore'],
-        });
-        const primary = worktrees.split('\0')[0];
-        if (primary.startsWith('worktree ')) return primary.slice('worktree '.length);
-      } catch {
-        // Fall back to the local root if Git metadata is unavailable.
-      }
-    }
-    if (fs.existsSync(path.join(dir, '.git')) || fs.existsSync(path.join(dir, '.pi'))) {
-      return dir;
-    }
-    const parent = path.dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return start;
+  return resolveProject(
+    start,
+    selectedProject || process.env.PI_SWARM_PROJECT_ROOT || process.env.PI_MESSENGER_CWD
+  );
 }
 
 async function startServer(): Promise<boolean> {
@@ -372,7 +326,7 @@ async function startServer(): Promise<boolean> {
   }
   // Always override: pin to project root, not the CLI's cwd
   env.PI_MESSENGER_CWD = projectRoot;
-  env.PI_MESSENGER_DIR = projectMessengerDir;
+  if (configuredStorage()) env.PI_MESSENGER_DIR = configuredStorage()!;
   // Explicit env vars take precedence if set (e.g., by the extension)
   if (process.env.PI_MESSENGER_DIR) env.PI_MESSENGER_DIR = process.env.PI_MESSENGER_DIR;
   if (process.env.PI_MESSENGER_CWD) env.PI_MESSENGER_CWD = process.env.PI_MESSENGER_CWD;
@@ -409,10 +363,7 @@ async function postAction(jsonBody: string): Promise<void> {
     try {
       const parsed = JSON.parse(body);
       if (parsed.ok && parsed.result?.text) {
-        if (
-          parsed.result.details?.error === 'verification_failed' ||
-          parsed.result.details?.error === 'invalid_recipient'
-        ) {
+        if (parsed.result.details?.error) {
           process.stderr.write(parsed.result.text + '\n');
           process.exit(1);
         }
@@ -479,6 +430,7 @@ function positional(args: string[], index: number): string | undefined {
 
 async function main(): Promise<void> {
   const rawArgs = process.argv.slice(2);
+  selectedProject = extractFlag(rawArgs, 'project');
 
   if (rawArgs.length === 0) {
     process.stderr.write('pi-messenger-swarm: no command provided. Use --help for usage.\n');
@@ -492,6 +444,14 @@ async function main(): Promise<void> {
     process.stdout.write(`pi-messenger-swarm — multi-agent coordination CLI
 
 Usage:
+  pi-messenger-swarm [--project <path>] <command>
+  pi-messenger-swarm run start --goal "..." [--max-steps 50] [--concurrency 3] [--verify "..."]
+  pi-messenger-swarm run join | run status | run show <id> | run accept
+  pi-messenger-swarm inbox | notifications
+  pi-messenger-swarm candidate list [--task <id>]
+  pi-messenger-swarm candidate show <id|latest> [--task <id>]
+  pi-messenger-swarm candidate restore <id|latest> [--task <id>] [--include <pattern>]
+  pi-messenger-swarm handoff status | handoff resume <taskId>
   pi-messenger-swarm join [--channel dev] [--create]
   pi-messenger-swarm status [--self]
   pi-messenger-swarm explain
@@ -561,7 +521,7 @@ Environment:
   }
 
   if (first === '--start') {
-    await startServer();
+    if (!(await startServer())) process.exit(1);
     const { body } = await httpGet(`${BASE_URL}/health`);
     process.stdout.write(body + '\n');
     return;
@@ -593,7 +553,7 @@ Environment:
       await httpPost(`${BASE_URL}/quit`, '', { 'x-preserve-spawns': '1' });
       await new Promise((r) => setTimeout(r, 200));
     }
-    await startServer();
+    if (!(await startServer())) process.exit(1);
     const { body } = await httpGet(`${BASE_URL}/health`);
     process.stdout.write(body + '\n');
     return;
@@ -604,6 +564,9 @@ Environment:
     spawn('tail', ['-f', LOG], { stdio: 'inherit' });
     return;
   }
+
+  // Validate even if a daemon is already serving a different Project.
+  resolveProjectRoot(process.cwd());
 
   // --- JSON passthrough ---
   // If the first arg looks like a JSON object, pass it through directly
@@ -655,6 +618,24 @@ Environment:
   const action = args.shift()!;
 
   switch (action) {
+    case 'run': {
+      const operation = args.shift() || 'status';
+      const goal = extractFlag(args, 'goal');
+      const verify = extractFlag(args, 'verify');
+      const maxSteps = extractFlag(args, 'max-steps');
+      const concurrency = extractFlag(args, 'concurrency');
+      await postAction(
+        buildAction({
+          action: `run.${operation}`,
+          id: args[0],
+          goal,
+          verify,
+          maxSteps: maxSteps ? Number(maxSteps) : undefined,
+          concurrency: concurrency ? Number(concurrency) : undefined,
+        })
+      );
+      break;
+    }
     // ---- Coordination ----
     case 'join': {
       const channel = extractFlag(args, 'channel');
@@ -667,6 +648,32 @@ Environment:
     case 'status': {
       const self = extractFlagBool(args, 'self');
       await postAction(buildAction({ action: 'status', self: self || undefined }));
+      break;
+    }
+    case 'handoff': {
+      await postAction(buildAction({ action: `handoff.${args[0] || 'status'}`, id: args[1] }));
+      break;
+    }
+    case 'candidate': {
+      const op = args.shift() || 'list';
+      const taskId = extractFlag(args, 'task');
+      const include = extractFlag(args, 'include');
+      await postAction(
+        buildAction({
+          action: `candidate.${op}`,
+          id: args[0],
+          taskId,
+          paths: include ? [include] : undefined,
+        })
+      );
+      break;
+    }
+    case 'notifications': {
+      await postAction(buildAction({ action: 'notifications', runId: extractFlag(args, 'run') }));
+      break;
+    }
+    case 'inbox': {
+      await postAction(buildAction({ action: 'inbox' }));
       break;
     }
     case 'explain': {
@@ -997,6 +1004,7 @@ Environment:
       } else {
         // spawn --role Role "mission text" [--task-id task-1] [--persona "..."] [--name name]
         //      [--agent-file path] [--objective "..."] [--context "..."] [--message-file path] [--force]
+        const model = extractFlag(args, 'model');
         const role = extractFlag(args, 'role') || extractFlag(args, 'title');
         const persona = extractFlag(args, 'persona');
         const taskId = extractFlag(args, 'task-id');
@@ -1031,6 +1039,7 @@ Environment:
         await postAction(
           buildAction({
             action: 'spawn',
+            model,
             role: role || undefined,
             persona: persona || undefined,
             taskId: taskId || undefined,

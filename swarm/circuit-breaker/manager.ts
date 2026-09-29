@@ -1,3 +1,5 @@
+import { activeRunId } from '../../project.js';
+import { readRun, updateRun, endRun } from '../run-store.js';
 import type { BudgetConfig, BudgetStatus } from './types.js';
 import { forceKillAllSpawned } from '../spawn.js';
 import { listActiveWorktrees, removeWorktree, pruneWorktrees } from '../worktree/index.js';
@@ -16,7 +18,10 @@ export class CircuitBreakerManager {
   private trippedAt?: string;
   private trippedReason?: string;
 
-  constructor(config?: Partial<BudgetConfig>) {
+  constructor(
+    config?: Partial<BudgetConfig>,
+    private scope?: { cwd: string; runId: string }
+  ) {
     if (config?.maxSteps !== undefined) this.maxSteps = config.maxSteps;
     if (config?.enabled !== undefined) this.enabled = config.enabled;
   }
@@ -32,11 +37,19 @@ export class CircuitBreakerManager {
     if (!this.enabled) {
       return { tripped: false, consumed: this.consumedSteps };
     }
-    if (this.tripped) {
+    if (this.isTripped()) {
       return { tripped: true, consumed: this.consumedSteps };
     }
 
-    this.consumedSteps++;
+    if (this.scope) {
+      const { cwd, runId } = this.scope;
+      const run = updateRun(cwd, runId, (current) => {
+        if (current.status === 'active' && current.consumedSteps < current.maxSteps)
+          current.consumedSteps++;
+      });
+      this.consumedSteps = run.consumedSteps;
+      this.maxSteps = run.maxSteps;
+    } else this.consumedSteps++;
     if (this.consumedSteps >= this.maxSteps) {
       this.tripped = true;
       this.trippedAt = new Date().toISOString();
@@ -51,6 +64,12 @@ export class CircuitBreakerManager {
   }
 
   public getStatus(): BudgetStatus {
+    if (this.scope) {
+      const run = readRun(this.scope.cwd, this.scope.runId)!;
+      this.consumedSteps = run.consumedSteps;
+      this.maxSteps = run.maxSteps;
+      this.tripped = run.status !== 'active' || run.consumedSteps >= run.maxSteps;
+    }
     return {
       consumedSteps: this.consumedSteps,
       maxSteps: this.maxSteps,
@@ -62,7 +81,7 @@ export class CircuitBreakerManager {
   }
 
   public isTripped(): boolean {
-    return this.tripped;
+    return this.scope ? this.getStatus().isTripped : this.tripped;
   }
 
   /**
@@ -70,6 +89,7 @@ export class CircuitBreakerManager {
    * lock blackboard while strictly preserving Zone 3 verified facts.
    */
   public async triggerAbort(cwd: string, sessionId: string, reason?: string): Promise<void> {
+    if (this.scope && activeRunId(cwd) !== this.scope.runId) return;
     // A human observer may have no registration/session header. Keep the
     // displayed session's verified facts when refreshing its locked projection.
     let snapshotSessionId = sessionId;
@@ -90,6 +110,12 @@ export class CircuitBreakerManager {
       this.trippedReason ||
       `Global step budget exceeded (${this.consumedSteps}/${this.maxSteps} steps)`;
     this.trippedReason = finalReason;
+
+    // Persist the stop before terminating peers: crash recovery must not resurrect them.
+    if (this.scope)
+      updateRun(cwd, this.scope.runId, (run) => {
+        run.status = 'aborted';
+      });
 
     // 1. Broadcast swarm.abort feed event to channels
     const msg = `🛑 [CIRCUIT BREAKER] Swarm aborted: ${finalReason}. All worker activity halted. Blackboard locked.`;
@@ -141,6 +167,7 @@ export class CircuitBreakerManager {
     try {
       writeBlackboard(cwd, snapshotSessionId);
     } catch {}
+    if (this.scope) endRun(cwd, this.scope.runId, 'aborted');
   }
 
   public reset(): void {
@@ -160,3 +187,20 @@ export class CircuitBreakerManager {
 }
 
 export const circuitBreaker = new CircuitBreakerManager();
+
+const runBreakers = new Map<string, CircuitBreakerManager>();
+export function getCircuitBreaker(cwd: string, sessionId?: string): CircuitBreakerManager {
+  const id = sessionId || activeRunId(cwd);
+  if (!id) return circuitBreaker;
+  let run;
+  try {
+    run = readRun(cwd, id);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  if (!run) return circuitBreaker; // Legacy session API, before explicit run admission.
+  const key = `${cwd}:${id}`;
+  if (!runBreakers.has(key))
+    runBreakers.set(key, new CircuitBreakerManager({ maxSteps: run.maxSteps }, { cwd, runId: id }));
+  return runBreakers.get(key)!;
+}

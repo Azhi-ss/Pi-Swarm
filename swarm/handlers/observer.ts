@@ -1,3 +1,4 @@
+import { runStatus } from './run.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { isProcessAlive } from '../../lib.js';
@@ -100,12 +101,18 @@ export function executeObserverStatus(
   snapshot.zones.forEach((zone, index) =>
     lines.push(`\x1b[${colors[index]}m│ ${zoneNames[index]}\x1b[0m`, zone)
   );
+  const run = runStatus(cwd);
+  lines.push(`Project: ${cwd}`, `Run: ${'id' in run ? run.id : 'none'} · ${run.phase}`);
+  if ('remainingSteps' in run)
+    lines.push(`Budget: ${run.remainingSteps}/${run.maxSteps} steps remaining`);
   lines.push('\x1b[1m│ Active Peers (PID)\x1b[0m');
   for (const peer of workers.values())
     lines.push(`- ${clip(peer.name.replace(/[\x00-\x1f\x7f-\x9f]/g, ''), 80)} · PID ${peer.pid}`);
   if (!workers.size) lines.push('No live peer processes.');
   lines.push('└─────────────────────────────────────');
   return result(lines.join('\n'), {
+    project: cwd,
+    run: runStatus(cwd),
     mode: 'status',
     available: snapshot.available,
     workers: [...workers.values()],
@@ -121,6 +128,7 @@ export function executeObserverExplain(cwd: string) {
   );
   const text = [
     'Swarm situation brief — BLACKBOARD.md snapshot',
+    `Project: ${cwd} · ${runStatus(cwd).phase}`,
     header,
     '',
     'Completed milestones (recorded in Verified):',

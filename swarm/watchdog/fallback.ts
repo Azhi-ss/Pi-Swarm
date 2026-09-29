@@ -53,7 +53,7 @@ export function resetFallbackLatch(sessionId?: string, taskId?: string): void {
 export function checkAllDead(cwd: string, sessionId: string, targetTaskId?: string): AllDeadStatus {
   const allTasks = replayTasks(cwd, sessionId);
   const runningSpawn = getRunningSpawnCount(cwd);
-  const runningManaged = processManager.list().length;
+  const runningManaged = processManager.list().filter((p) => p.cwd === cwd).length;
   const runningWorkerCount = Math.max(runningSpawn, runningManaged);
 
   if (targetTaskId) {
@@ -133,7 +133,7 @@ export function triggerAllDeadFallback(
     'watchdog',
     'task.dead_end',
     primaryTask?.id,
-    '🛑 [ALL-DEAD] All hypotheses failed. Main agent awakened with Attribution Brief.',
+    '🛑 [ALL-DEAD] All hypotheses failed. Attribution Brief recorded; critical delivery may be pending.',
     primaryTask?.channel ?? 'unknown'
   );
 

@@ -1,3 +1,4 @@
+import { messengerDirs, activeRunId } from '../project.js';
 import * as fs from 'node:fs';
 import { execSync } from 'node:child_process';
 import { join, resolve } from 'node:path';
@@ -92,7 +93,7 @@ export function getContextSessionId(ctx: ExtensionContext): string {
  */
 export function getProjectChannelSessionId(cwd: string, channelId: string): string | null {
   const normalized = normalizeChannelId(channelId);
-  const channelPath = join(cwd, '.pi', 'messenger', 'channels', `${normalized}.jsonl`);
+  const channelPath = join(messengerDirs(cwd).base, 'channels', `${normalized}.jsonl`);
   try {
     if (!fs.existsSync(channelPath)) return null;
     const content = fs.readFileSync(channelPath, 'utf-8');
@@ -116,6 +117,8 @@ export function getProjectChannelSessionId(cwd: string, channelId: string): stri
  * regardless of which pi process (parent or subagent) performs them.
  */
 export function getEffectiveSessionId(cwd: string, state: MessengerState): string {
+  const run = activeRunId(cwd);
+  if (run) return run;
   const currentChannel = state.currentChannel ?? state.sessionChannel;
   if (currentChannel) {
     const channelSessionId = getProjectChannelSessionId(cwd, currentChannel);
@@ -135,7 +138,7 @@ export function ensureStateChannels(
   ensureDefaultNamedChannels(dirs, state.agentName || undefined);
 
   const inheritedChannel = process.env.PI_MESSENGER_CHANNEL?.trim();
-  const sessionId = getContextSessionId(ctx);
+  const sessionId = activeRunId(ctx.cwd) || getContextSessionId(ctx);
 
   let sessionChannel = state.sessionChannel?.trim();
   let resetToSessionChannel = false;

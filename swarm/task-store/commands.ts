@@ -19,7 +19,7 @@ import { getTasks, getAllTasks, getTask, taskExists, isLeaseExpired } from './qu
 import { normalizeChannelId } from '../../channel.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { circuitBreaker } from '../circuit-breaker/index.js';
+import { getCircuitBreaker } from '../circuit-breaker/index.js';
 
 function allocateTaskId(cwd: string, sessionId: string): string {
   const allTasks = getAllTasks(cwd, sessionId);
@@ -37,7 +37,7 @@ export function createTask(
   input: SwarmTaskCreateInput,
   channelId: string
 ): SwarmTask {
-  if (circuitBreaker.isTripped()) {
+  if (getCircuitBreaker(cwd, sessionId).isTripped()) {
     throw new Error('Circuit breaker is tripped: swarm mutations locked');
   }
   const normalizedChannel = normalizeChannelId(channelId);
@@ -74,7 +74,7 @@ export function claimTask(
   agentName: string,
   reason?: string
 ): SwarmTask | null {
-  if (circuitBreaker.isTripped()) {
+  if (getCircuitBreaker(cwd, sessionId).isTripped()) {
     return null;
   }
   let task = getTask(cwd, sessionId, taskId);
@@ -124,7 +124,7 @@ export function stakeTask(
   agentName: string,
   options?: { ttl?: number; proposalId?: string; reason?: string }
 ): SwarmTask | null {
-  if (circuitBreaker.isTripped()) {
+  if (getCircuitBreaker(cwd, sessionId).isTripped()) {
     return null;
   }
   let task = getTask(cwd, sessionId, taskId);
@@ -448,7 +448,7 @@ export function proposeTask(
   agentName: string,
   proposal: string
 ): SwarmTask | null {
-  if (circuitBreaker.isTripped()) {
+  if (getCircuitBreaker(cwd, sessionId).isTripped()) {
     return null;
   }
   const task = getTask(cwd, sessionId, taskId);
@@ -473,7 +473,7 @@ export function challengeTask(
   objection: string,
   targetClaimant?: string
 ): SwarmTask | null {
-  if (circuitBreaker.isTripped()) {
+  if (getCircuitBreaker(cwd, sessionId).isTripped()) {
     return null;
   }
   const task = getTask(cwd, sessionId, taskId);

@@ -14,6 +14,7 @@ export interface ManagedWorkerProcess {
   startedAt: string;
   status: 'running' | 'completed' | 'failed' | 'timeout' | 'stopped';
   timeoutMs: number;
+  deferTimeoutCleanup?: boolean;
   error?: string;
 }
 
@@ -102,7 +103,7 @@ export class ProcessManager {
         }
 
         // Coordinate Module 7 sandbox cleanup
-        if (w.cwd) {
+        if (w.cwd && !w.deferTimeoutCleanup) {
           try {
             removeWorktree(w.cwd, w.id);
           } catch {}

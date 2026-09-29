@@ -16,7 +16,7 @@ import {
 } from '../spawn.js';
 import type { SpawnRequest } from '../types.js';
 import { formatRoleLabel } from '../labels.js';
-import { circuitBreaker } from '../circuit-breaker/index.js';
+import { getCircuitBreaker } from '../circuit-breaker/index.js';
 
 export function executeSpawn(
   op: string | null,
@@ -176,7 +176,7 @@ function spawnCreate(
   sessionId: string,
   maxConcurrentSpawns?: number
 ) {
-  if (circuitBreaker.isTripped()) {
+  if (getCircuitBreaker(cwd, sessionId).isTripped()) {
     return result('Error: Circuit breaker is tripped. Spawning new agents is locked.', {
       mode: 'spawn',
       error: 'circuit_broken',
@@ -242,6 +242,7 @@ function spawnCreate(
   if (params.agentFile) {
     const request: SpawnRequest = {
       agentFile: params.agentFile,
+      model: params.model,
       objective: params.objective,
       message,
       context: params.context,
@@ -287,6 +288,7 @@ function spawnCreate(
     role,
     persona: params.persona,
     objective,
+    model: params.model,
     context: params.context,
     taskId: params.taskId,
     name: params.name,

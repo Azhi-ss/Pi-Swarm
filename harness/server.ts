@@ -1,3 +1,6 @@
+import { withRunLock } from '../swarm/run-store.js';
+import { recoverRun, recordTakeover } from '../swarm/recovery.js';
+import { enqueueCritical } from '../swarm/notifications.js';
 /**
  * Pi Messenger Harness Server
  *
@@ -19,7 +22,7 @@
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import * as fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { MessengerState, Dirs, AgentMailMessage, NameThemeConfig } from '../lib.js';
@@ -44,23 +47,53 @@ import {
   getRunningSpawnCount,
 } from '../swarm/spawn.js';
 
+import {
+  resolveProject,
+  messengerDirs,
+  selectStorage,
+  configuredStorage,
+  activeRunId,
+} from '../project.js';
+
 function getMessengerDirs(cwd?: string): Dirs {
   const effectiveCwd = cwd ?? process.env.PI_MESSENGER_CWD ?? process.cwd();
-  const baseDir =
-    process.env.PI_MESSENGER_DIR ||
-    (process.env.PI_MESSENGER_GLOBAL === '1'
-      ? join(getAgentDir(), 'messenger')
-      : join(normalizeCwd(effectiveCwd), '.pi/messenger'));
-  return {
-    base: baseDir,
-    registry: join(baseDir, 'registry'),
-  };
+  return messengerDirs(normalizeCwd(effectiveCwd));
 }
 
 // Bootstrap dirs from the server's startup cwd for health checks and
 // initial setup. Per-request dirs are resolved in the action handler
 // using the requesting agent's cwd from registration files.
+const startupCwd = normalizeCwd(process.env.PI_MESSENGER_CWD || process.cwd());
+if (configuredStorage()) selectStorage(startupCwd, configuredStorage()!);
 const startupDirs = getMessengerDirs();
+const projectsFile = `${process.env.PI_MESSENGER_LOG || '/tmp/pi-messenger-swarm.log'}.projects.jsonl`;
+const knownProjects = new Set<string>();
+try {
+  for (const line of fs.readFileSync(projectsFile, 'utf8').split('\n')) {
+    try {
+      const cwd = JSON.parse(line);
+      if (typeof cwd === 'string' && fs.existsSync(cwd)) knownProjects.add(cwd);
+    } catch {}
+  }
+} catch {}
+function rememberProject(cwd: string): void {
+  if (knownProjects.has(cwd)) return;
+  knownProjects.add(cwd);
+  ensureDirSync(dirname(projectsFile));
+  fs.appendFileSync(projectsFile, JSON.stringify(cwd) + '\n');
+  reconcileAndRestoreOrphans(join(cwd, '.pi/messenger'));
+}
+for (const cwd of knownProjects) reconcileAndRestoreOrphans(join(cwd, '.pi/messenger'));
+const recoveryTimer = setInterval(() => {
+  for (const cwd of knownProjects) {
+    try {
+      recoverRun(cwd);
+    } catch (error) {
+      serverLog(`recovery ${cwd}: ${String(error)}`);
+    }
+  }
+}, 500);
+recoveryTimer.unref();
 
 // Ensure channel / registry dirs exist for the startup project
 ensureDirSync(startupDirs.registry);
@@ -92,8 +125,6 @@ if (orphanCount > 0) {
 const dirsCache = new Map<string, Dirs>();
 
 function dirsForCwd(cwd: string): Dirs {
-  const cached = dirsCache.get(cwd);
-  if (cached) return cached;
   const dirs = getMessengerDirs(cwd);
   dirsCache.set(cwd, dirs);
 
@@ -231,57 +262,6 @@ function resolveAgentState(
     }
   }
 
-  // Strategy 3: fallback — single agent or most recently active
-  // Skip if an explicit agent name was provided but not found.
-  if (!registered && !agentName && regs.length > 0) {
-    if (regs.length === 1) {
-      const reg = regs[0];
-      resolvedName = reg.name;
-      sessionIdFromDisk = reg.sessionId || '';
-      currentChannel = reg.currentChannel || '';
-      sessionChannel = reg.sessionChannel || currentChannel;
-      joinedChannels = reg.joinedChannels || [];
-      registered = true;
-    } else {
-      // Multiple agents, no identity hint — pick most recently active by mtime
-      let best: { name: string; mtime: number } | null = null;
-      for (const f of fs.readdirSync(dirs.registry).filter((f) => f.endsWith('.json'))) {
-        const stat = fs.statSync(join(dirs.registry, f));
-        if (!best || stat.mtimeMs > best.mtime) {
-          best = { name: f.replace(/\.json$/, ''), mtime: stat.mtimeMs };
-        }
-      }
-      if (best) {
-        const reg = regs.find((r) => r.name === best!.name);
-        if (reg) {
-          resolvedName = reg.name;
-          sessionIdFromDisk = reg.sessionId || '';
-          currentChannel = reg.currentChannel || '';
-          sessionChannel = reg.sessionChannel || currentChannel;
-          joinedChannels = reg.joinedChannels || [];
-          registered = true;
-        }
-      }
-    }
-  }
-
-  // Session mismatch: the request's x-session-id differs from the
-  // registration's sessionId. This happens when:
-  //   1. The session-id file was overwritten by a different pi process
-  //   2. The agent resumed in a new pi session after a crash/disconnect
-  //   3. Multiple pi sessions share the same project directory
-  //
-  // We must NOT wipe currentChannel or joinedChannels — these reflect the
-  // agent's actual working state (they explicitly joined those channels).
-  // Doing so causes the exact failure observed in the wild: coordinator
-  // joins #loud-moon, spawns agents, then after a harness restart its
-  // feed/task.list/task.show calls resolve to the wrong channel because
-  // the session mismatch wiped the channel context.
-  //
-  // We only reset sessionChannel — the per-session channel is tied to the
-  // old session and a new one will be created for the current session if
-  // needed. But if the agent's currentChannel matches the old sessionChannel,
-  // update it to the new session's channel when it's created below.
   if (
     registered &&
     requestSessionId &&
@@ -406,13 +386,6 @@ function createHarnessContext(sessionId: string, cwd?: string): HarnessContext {
   };
 }
 
-// Pull-based message delivery: messages are written to the channel feed.
-// Agents read the feed themselves via `pi-messenger-swarm feed --limit 10`.
-// No RPC push — this is kafka-like, not pub/sub.
-const deliverMessage = (_msg: AgentMailMessage): void => {
-  // Messages are already persisted in the feed by the send handler.
-  // Agents discover them by reading the feed on their own schedule.
-};
 const updateStatus = (_ctx: unknown): void => {};
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
@@ -486,6 +459,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     res.end(
       JSON.stringify({
         ok: true,
+        pid: process.pid,
         uptime: Math.floor((Date.now() - startedAt) / 1000),
         agents,
         version: SERVER_VERSION,
@@ -527,7 +501,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     // Resolve agent identity from request headers
     const callerPidStr = header(req, 'x-caller-pid');
     const callerPid = callerPidStr ? parseInt(callerPidStr, 10) : undefined;
-    const agentName = header(req, 'x-agent-name');
+    const agentName = header(req, 'x-agent-name') || (callerPid ? `Peer${callerPid}` : 'Delegator');
     const sessionId = header(req, 'x-session-id');
     const channelHint = header(req, 'x-messenger-channel');
     // The CLI sends its cwd so the server can resolve the correct project
@@ -538,80 +512,103 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
       `action: ${action} agent_name: ${agentName || '(none)'} caller_pid: ${callerPid || '(none)'} session: ${sessionId || '(none)'} channel: ${channelHint || '(auto)'} caller_cwd: ${callerCwd || '(none)'}`
     );
 
-    // Determine the project cwd for this request.
-    // Priority: x-caller-cwd header > registration file's cwd > PI_MESSENGER_CWD env > server process.cwd()
-    // This ensures each project gets its own dirs (channels, registry) and config
-    // even when multiple projects share the same harness server.
-    let projectCwd = callerCwd
-      ? normalizeCwd(callerCwd)
-      : normalizeCwd(process.env.PI_MESSENGER_CWD ?? process.cwd());
-    // Pre-resolve state from the startup dirs to read the registration's cwd
-    const preState = resolveAgentState(startupDirs, callerPid, agentName, channelHint, sessionId);
-    // If the matched registration has a cwd, prefer it (it reflects the agent's project)
-    if (!callerCwd && preState.state.registered && preState.resolvedCwd) {
-      projectCwd = preState.resolvedCwd;
-    }
-    // Re-resolve with project-specific dirs and config
-    const dirs = dirsForCwd(projectCwd);
-    const routerConfig = routerConfigForCwd(projectCwd);
+    try {
+      if (!callerCwd) throw new Error('Missing Project Context: x-caller-cwd is required.');
+      const projectCwd = resolveProject(callerCwd);
+      rememberProject(projectCwd);
+      const runId = activeRunId(projectCwd);
+      if (!runId && (action === 'task.create' || action === 'spawn'))
+        throw new Error('No active Swarm Run; use run start --goal before creating work.');
+      const requestedRun = header(req, 'x-run-id');
+      if (requestedRun && requestedRun !== runId)
+        throw new Error('Stale run context: the selected run is no longer active.');
+      const storage = header(req, 'x-storage-root');
+      if (storage) selectStorage(projectCwd, storage);
+      // Re-resolve with project-specific dirs and config
+      const dirs = dirsForCwd(projectCwd);
+      const routerConfig = routerConfigForCwd(projectCwd);
 
-    // Build per-request state from disk
-    const { state, resolvedCwd } = resolveAgentState(
-      dirs,
-      callerPid,
-      agentName,
-      channelHint,
-      sessionId,
-      projectCwd
-    );
-    // Use session ID from header (written by extension to .pi/messenger/session-id)
-    // if available, otherwise fall back to the state's contextSessionId (from disk).
-    const effectiveSessionId = sessionId || state.contextSessionId || '';
-    const ctx = createHarnessContext(effectiveSessionId, resolvedCwd);
-    // Also update the state's contextSessionId so handlers use it
-    state.contextSessionId = effectiveSessionId;
-
-    // If the registration on disk has an empty sessionId but we now have one
-    // (from the x-session-id header), patch the registration file so the
-    // channel's sessionId and future reads are consistent.
-    if (effectiveSessionId && state.registered && state.agentName) {
-      const regPath = join(dirs.registry, `${state.agentName}.json`);
-      try {
-        if (fs.existsSync(regPath)) {
-          const reg = JSON.parse(fs.readFileSync(regPath, 'utf-8'));
-          if (!reg.sessionId) {
-            reg.sessionId = effectiveSessionId;
-            fs.writeFileSync(regPath, JSON.stringify(reg, null, 2));
-          }
-        }
-      } catch {
-        // Best effort
+      // Build per-request state from disk
+      const { state, resolvedCwd } = resolveAgentState(
+        dirs,
+        callerPid,
+        agentName,
+        channelHint,
+        sessionId,
+        projectCwd
+      );
+      // Use session ID from header (written by extension to .pi/messenger/session-id)
+      // if available, otherwise fall back to the state's contextSessionId (from disk).
+      const effectiveSessionId = runId || sessionId || state.contextSessionId || '';
+      if (runId) {
+        const channel = ensureSessionChannel(dirs, runId, state.agentName || undefined).id;
+        state.currentChannel = channel;
+        state.sessionChannel = channel;
       }
+      const ctx = createHarnessContext(effectiveSessionId, resolvedCwd);
+      // Also update the state's contextSessionId so handlers use it
+      state.contextSessionId = effectiveSessionId;
 
-      // Also patch the session channel's sessionId if it was created before
-      // the session-id file was available.
-      const ch = state.currentChannel || state.sessionChannel;
-      if (ch) {
+      // If the registration on disk has an empty sessionId but we now have one
+      // (from the x-session-id header), patch the registration file so the
+      // channel's sessionId and future reads are consistent.
+      if (effectiveSessionId && state.registered && state.agentName) {
+        const regPath = join(dirs.registry, `${state.agentName}.json`);
         try {
-          patchChannelSessionId(dirs, ch, effectiveSessionId);
+          if (fs.existsSync(regPath)) {
+            const reg = JSON.parse(fs.readFileSync(regPath, 'utf-8'));
+            if (!reg.sessionId) {
+              reg.sessionId = effectiveSessionId;
+              fs.writeFileSync(regPath, JSON.stringify(reg, null, 2));
+            }
+          }
         } catch {
           // Best effort
         }
-      }
-    }
 
-    try {
-      const result = await executeAction(
-        action,
-        params,
-        state,
-        dirs,
-        ctx as any,
-        deliverMessage,
-        updateStatus,
-        undefined,
-        routerConfig
-      );
+        // Also patch the session channel's sessionId if it was created before
+        // the session-id file was available.
+        const ch = state.currentChannel || state.sessionChannel;
+        if (ch) {
+          try {
+            patchChannelSessionId(dirs, ch, effectiveSessionId);
+          } catch {
+            // Best effort
+          }
+        }
+      }
+
+      const dispatch = () =>
+        executeAction(
+          action,
+          params,
+          state,
+          dirs,
+          ctx as any,
+          (msg) =>
+            enqueueCritical(
+              projectCwd,
+              effectiveSessionId,
+              msg,
+              String(params.id || params.taskId || '')
+            ),
+          updateStatus,
+          undefined,
+          routerConfig
+        );
+
+      const result = await (runId &&
+      [
+        'task.claim',
+        'task.stake',
+        'task.unclaim',
+        'task.reset',
+        'task.block',
+        'task.unblock',
+        'task.create',
+      ].includes(action)
+        ? withRunLock(projectCwd, dispatch)
+        : dispatch());
 
       let text = '';
       let details: Record<string, unknown> = {};
@@ -629,6 +626,8 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
         text = result;
       }
 
+      if (runId && ['task.claim', 'task.stake', 'task.start'].includes(action) && !details.error)
+        recordTakeover(projectCwd, runId, String(params.id || params.taskId), state.agentName);
       res.writeHead(200, TEXT_JSON);
       res.end(JSON.stringify({ ok: true, result: { text, details } }));
     } catch (e) {
@@ -662,6 +661,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
   // exits without killing spawned agents — they survive as independent
   // processes and the next server instance reconnects via restoreRuntimes().
   if (req.method === 'POST' && url.pathname === '/quit') {
+    clearInterval(recoveryTimer);
     const preserveSpawns = header(req, 'x-preserve-spawns') === '1';
 
     if (preserveSpawns) {
@@ -712,6 +712,7 @@ server.listen(PORT, '127.0.0.1', () => {
 // spawned agents (the common case is a version-mismatch restart where
 // we want agents to survive).
 const shutdown = (signal: string, preserveSpawns = true) => {
+  clearInterval(recoveryTimer);
   serverLog(`received ${signal}, shutting down (preserve=${preserveSpawns})`);
   if (preserveSpawns) {
     persistRuntimes(startupDirs.base);
