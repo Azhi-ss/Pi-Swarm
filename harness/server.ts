@@ -48,7 +48,7 @@ import {
 } from '../swarm/spawn.js';
 
 import {
-  resolveProject,
+  resolveProjectContext,
   messengerDirs,
   selectStorage,
   configuredStorage,
@@ -202,18 +202,16 @@ function readRegistrations(dirs: Dirs): RegistrationFile[] {
  */
 function resolveAgentState(
   dirs: Dirs,
-  callerPid?: number,
-  agentName?: string,
-  channelHint?: string,
-  requestSessionId?: string,
-  projectCwd?: string
+  callerPid: number | undefined,
+  agentName: string | undefined,
+  channelHint: string | undefined,
+  requestSessionId: string | undefined,
+  projectCwd: string
 ): {
   state: MessengerState;
   resolvedCwd: string;
 } {
-  // Default to the project cwd (set by the extension via PI_MESSENGER_CWD
-  // when spawning the harness). Fall back to process.cwd() if not available.
-  const resolvedCwd = normalizeCwd(projectCwd ?? process.env.PI_MESSENGER_CWD ?? process.cwd());
+  const resolvedCwd = normalizeCwd(projectCwd);
 
   let registered = false;
   let resolvedName = '';
@@ -514,7 +512,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
 
     try {
       if (!callerCwd) throw new Error('Missing Project Context: x-caller-cwd is required.');
-      const projectCwd = resolveProject(callerCwd);
+      const projectCwd = resolveProjectContext({ cwd: callerCwd });
       rememberProject(projectCwd);
       const runId = activeRunId(projectCwd);
       if (!runId && (action === 'task.create' || action === 'spawn'))

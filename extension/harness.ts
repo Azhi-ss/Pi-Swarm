@@ -3,6 +3,7 @@
  */
 
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
+import { resolveProjectContext } from '../project.js';
 import * as fs from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -111,20 +112,30 @@ export function createHarnessServer(messengerDir: string): HarnessServerControll
   function start(): void {
     if (harnessProcess) return;
 
-    const { PI_MESSENGER_CHANNEL, ...restEnv } = process.env as Record<string, string | undefined>;
+    const {
+      PI_MESSENGER_CHANNEL,
+      PI_MESSENGER_CWD: _inheritedProject,
+      ...restEnv
+    } = process.env as Record<string, string | undefined>;
 
     // PI_MESSENGER_CHANNEL is a per-request hint (sent via x-messenger-channel
     // header) that tells a child process which channel to join. The harness is
     // a long-lived shared daemon — baking this env var into its process
     // environment makes every subsequent request resolve to that channel,
     // regardless of which agent actually issued the request.
+    let pinnedProject: string | undefined;
+    try {
+      pinnedProject = resolveProjectContext({
+        cwd: process.cwd(),
+        peer: process.env.PI_SWARM_PROJECT_ROOT,
+      });
+    } catch {
+      pinnedProject = undefined;
+    }
     const env: Record<string, string> = {
       ...(restEnv as Record<string, string>),
-      // Always override so the harness server writes to the same
-      // directory as the extension, even though the harness is spawned
-      // with cwd: process.cwd() (the pi-messenger repo).
       ...(process.env.PI_MESSENGER_DIR ? { PI_MESSENGER_DIR: process.env.PI_MESSENGER_DIR } : {}),
-      PI_MESSENGER_CWD: process.cwd(),
+      ...(pinnedProject ? { PI_MESSENGER_CWD: pinnedProject } : {}),
     };
 
     if (process.env.PI_MESSENGER_GLOBAL) {

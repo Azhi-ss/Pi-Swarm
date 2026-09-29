@@ -57,7 +57,7 @@ import * as http from 'node:http';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-import { resolveProject, messengerDirs, configuredStorage } from '../project.js';
+import { resolveProjectContext, messengerDirs, configuredStorage } from '../project.js';
 let selectedProject: string | undefined;
 
 const PORT = Number(process.env.PI_MESSENGER_PORT ?? 9877);
@@ -278,19 +278,13 @@ async function isUp(): Promise<boolean> {
   return status === 200;
 }
 
-/**
- * Resolve the project root directory by walking up from `start` to find the
- * nearest ancestor containing `.git/` or `.pi/`. Falls back to `start` itself.
- *
- * This ensures the harness server always uses the project's root
- * `.pi/messenger/` directory, regardless of which subdirectory
- * (e.g., dist/) the CLI was invoked from.
- */
+/** Resolve the caller's Project from `--project`, peer context, or the working directory. */
 function resolveProjectRoot(start: string): string {
-  return resolveProject(
-    start,
-    selectedProject || process.env.PI_SWARM_PROJECT_ROOT || process.env.PI_MESSENGER_CWD
-  );
+  return resolveProjectContext({
+    cwd: start,
+    explicit: selectedProject,
+    peer: process.env.PI_SWARM_PROJECT_ROOT,
+  });
 }
 
 async function startServer(): Promise<boolean> {
@@ -324,12 +318,11 @@ async function startServer(): Promise<boolean> {
   for (const key of ['PI_MESSENGER_GLOBAL'] as const) {
     if (process.env[key]) env[key] = process.env[key]!;
   }
-  // Always override: pin to project root, not the CLI's cwd
+  // Pin the new service to the caller's resolved Project. A stale
+  // PI_MESSENGER_CWD must not redirect startup at another Project.
   env.PI_MESSENGER_CWD = projectRoot;
   if (configuredStorage()) env.PI_MESSENGER_DIR = configuredStorage()!;
-  // Explicit env vars take precedence if set (e.g., by the extension)
   if (process.env.PI_MESSENGER_DIR) env.PI_MESSENGER_DIR = process.env.PI_MESSENGER_DIR;
-  if (process.env.PI_MESSENGER_CWD) env.PI_MESSENGER_CWD = process.env.PI_MESSENGER_CWD;
 
   // Build the server's environment: start from process.env but strip
   // PI_MESSENGER_CHANNEL — it is a per-request hint for spawned subagents,
@@ -503,6 +496,13 @@ Usage:
 Also accepts JSON for programmatic use:
   pi-messenger-swarm '{ "action": "join" }'
   pi-messenger-swarm '{ "action": "task.claim", "id": "task-1" }'
+
+Project selection, with no confirmation prompt:
+  --project <path>              Use this Project
+  PI_SWARM_PROJECT_ROOT         Owning Project supplied to a peer
+  working directory             Owning Git repository, directory with .pi, a parent, or a managed sandbox
+  A missing Project is an error. The last-used Project, installation directory,
+  PI_MESSENGER_CWD, and the service startup directory are not selectors.
 
 Environment:
   PI_MESSENGER_PORT     Server port (default: 9877)

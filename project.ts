@@ -6,8 +6,35 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import type { Dirs } from './lib.js';
 
-export function resolveProject(start: string, explicit?: string): string {
-  let dir = fs.realpathSync(path.resolve(explicit || start));
+/**
+ * Select the Project for a command.
+ * Explicit `--project` and peer-supplied `PI_SWARM_PROJECT_ROOT` win over the working directory.
+ * A service pin, last-used Project, installation directory, or startup directory is not a selector.
+ */
+export function resolveProjectContext(input: {
+  cwd: string;
+  explicit?: string;
+  peer?: string;
+}): string {
+  const explicit = input.explicit?.trim();
+  if (explicit) return resolveProject(explicit);
+  const peer = input.peer?.trim();
+  if (peer) return resolveProject(peer);
+  return resolveProject(input.cwd);
+}
+
+export function resolveProject(start: string): string {
+  let dir: string;
+  try {
+    dir = fs.realpathSync(path.resolve(start));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(
+        `Missing Project Context: ${start} was not found. Run inside a Project or use --project <path>.`
+      );
+    }
+    throw error;
+  }
   while (true) {
     if (fs.existsSync(path.join(dir, '.git'))) {
       // Only managed sandboxes inherit ownership; ordinary worktrees are Projects.

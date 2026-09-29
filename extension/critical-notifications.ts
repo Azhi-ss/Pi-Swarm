@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import { activeRunId, resolveProject } from '../project.js';
+import { activeRunId, resolveProjectContext } from '../project.js';
 import { acknowledgeCritical, claimCritical } from '../swarm/notifications.js';
 
 /** The Pi host consumes urgent records; ordinary inboxes remain pull-based. */
@@ -11,7 +11,10 @@ export function installCriticalDelivery(pi: ExtensionAPI, recipient: () => strin
   let runId: string;
   pi.on('session_start', (_event, ctx) => {
     process.env.PI_SWARM_PEER_PID = String(process.pid);
-    project = resolveProject(ctx.cwd, process.env.PI_SWARM_PROJECT_ROOT);
+    project = resolveProjectContext({
+      cwd: ctx.cwd,
+      peer: process.env.PI_SWARM_PROJECT_ROOT,
+    });
     runId = process.env.PI_SWARM_RUN_ID || activeRunId(project) || '';
     if (timer) clearInterval(timer);
     timer = setInterval(() => {

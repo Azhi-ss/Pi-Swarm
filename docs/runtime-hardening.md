@@ -30,9 +30,15 @@ For maintainers, produce that tarball with `pnpm run build` followed by `npm pac
 
 ## Project and run selection
 
-Run the CLI from the target Git repository, from a directory with `.pi`, or use `--project /absolute/project`. A managed detached Sandbox resolves to its owning Project. A directory without a Project fails instead of borrowing the service's last Project. Installation paths never select the target.
+A command selects one Project and uses it immediately, with no confirmation prompt:
 
-`PI_MESSENGER_DIR` and `PI_MESSENGER_GLOBAL=1` select a storage root. The Project records that selection locally; messaging below shared roots is partitioned by canonical Project path and run ID. Task and recovery evidence remains under the owning Project. Changing an established storage root requires an explicit migration; the runtime refuses a silent switch. Read ordinary messages with `pi-messenger-swarm inbox`.
+1. `--project <path>`
+2. `PI_SWARM_PROJECT_ROOT`, the owning Project supplied to a peer
+3. The Project that owns the working directory. Ownership walks through parent directories and includes a Git repository, a directory containing `.pi`, and a managed detached Sandbox at `.swarm/workspaces/worker-<id>/`
+
+A nested directory and a Sandbox both resolve to that owning Project. When none of the three selectors identify a Project, project-scoped commands exit with `Missing Project Context: run inside a Project or use --project <path>.` They do not select a last-used Project, the package installation directory, `PI_MESSENGER_CWD`, or the directory where the service process started, and they do not change or stop any other Project.
+
+`PI_MESSENGER_DIR` and `PI_MESSENGER_GLOBAL=1` select a storage root, not the Project. The Project records that selection locally; messaging below shared roots is partitioned by canonical Project path and run ID. Task and recovery evidence remains under the owning Project. Changing an established storage root requires an explicit migration; the runtime refuses a silent switch. Read ordinary messages with `pi-messenger-swarm inbox`.
 
 ```sh
 pi-messenger-swarm run start --goal "Implement the accepted specification" --max-steps 50 --concurrency 3 --verify "npm run acceptance"
@@ -67,6 +73,8 @@ Restoring never modifies the host or makes a Verified fact. Conflicts remain in 
 ## Runtime acceptance tests
 
 `npx vitest run tests/runtime/installed.test.ts` builds and packs the release, installs with `--omit=dev` and normal scripts, and exercises the installed CLI/service in independent Git repositories. Real installed Pi processes use a deterministic local model-provider fixture at the external model API boundary; delivery and recovery are not replaced by mocked internal callbacks. This is runtime-hardening evidence, not evidence of the separate Bohrium scientific benchmark's score or ranking.
+
+`npx vitest run tests/runtime/project-context.test.ts` drives the generated command wrapper and CLI through the service with the workspace's already-installed Pi runtime. It covers a separate target Project, a nested directory, a detached Sandbox, explicit and peer-supplied context, and a missing context that leaves other Projects unchanged. Clean dependency installation remains the installed-suite scenario above.
 
 To run only the installation smoke scenario (no model credentials required):
 

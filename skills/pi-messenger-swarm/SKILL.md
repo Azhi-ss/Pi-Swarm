@@ -17,6 +17,8 @@ The CLI auto-spawns a long-lived HTTP server (the **harness**) on first use. Eve
 
 If installed globally (`npm install -g pi-messenger-swarm`), the `pi-messenger-swarm` command is on your PATH. Otherwise, the extension installs a shell wrapper script at `~/.pi/agent/bin/pi-messenger-swarm` which pi adds to PATH automatically — no manual setup needed.
 
+The wrapper keeps the caller's working directory. A command selects its Project from `--project`, then `PI_SWARM_PROJECT_ROOT`, then the owning Project of the current directory, a parent directory, or the managed Sandbox under `.swarm/workspaces/`. A valid selection is used immediately. Outside a Project, with neither flag nor peer context, the command reports `Missing Project Context` and does not act on another Project.
+
 Agent identity is resolved by the CLI using the `PI_AGENT_NAME` environment variable (set by the parent on spawn). The CLI sends this to the harness server, which matches it against registrations on disk. If `PI_AGENT_NAME` is not set (e.g., human terminal), the CLI falls back to walking the process tree to find the parent `pi` process PID.
 
 ```

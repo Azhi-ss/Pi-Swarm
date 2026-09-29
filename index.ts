@@ -1,7 +1,7 @@
 import { installCriticalDelivery } from './extension/critical-notifications.js';
 import {
   messengerDirs,
-  resolveProject,
+  resolveProjectContext,
   configuredStorage,
   selectStorage,
   activeRunId,
@@ -93,7 +93,10 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
   const nameTheme = { theme: config.nameTheme, customWords: config.nameWords };
 
   function getMessengerDirs(): Dirs {
-    const project = resolveProject(process.cwd(), process.env.PI_SWARM_PROJECT_ROOT);
+    const project = resolveProjectContext({
+      cwd: process.cwd(),
+      peer: process.env.PI_SWARM_PROJECT_ROOT,
+    });
     if (configuredStorage()) selectStorage(project, configuredStorage()!);
     return messengerDirs(project);
   }
@@ -556,7 +559,10 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
   });
 
   pi.on('tool_call', async (event, ctx) => {
-    const cwd = resolveProject(ctx.cwd, process.env.PI_SWARM_PROJECT_ROOT);
+    const cwd = resolveProjectContext({
+      cwd: ctx.cwd,
+      peer: process.env.PI_SWARM_PROJECT_ROOT,
+    });
     if (process.env.PI_SWARM_RUN_ID && process.env.PI_SWARM_RUN_ID !== activeRunId(cwd))
       return { block: true, reason: 'This Swarm Run is no longer active.' };
     const sessionId = getEffectiveSessionId(cwd, state);
