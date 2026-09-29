@@ -2,14 +2,31 @@
 
 Pi-Swarm is a Pi extension with a companion CLI. It requires Node.js 22.19 or later and a compatible Pi Host. The tested host and TUI versions are `@earendil-works/pi-coding-agent@0.87.0` and `@earendil-works/pi-tui@0.87.0`; the peer dependency contract is `0.87.x`.
 
-A reproducible local installation, without a source checkout or development dependencies:
+A reproducible installation from a release tarball, without a source checkout or development dependencies (replace the tarball and target-project paths):
 
 ```sh
-npm install --omit=dev @earendil-works/pi-coding-agent@0.87.0 @earendil-works/pi-tui@0.87.0 pi-messenger-swarm
-npx pi --extension ./node_modules/pi-messenger-swarm/dist/index.js
+export PI_SWARM_INSTALL="$HOME/.local/share/pi-swarm"
+mkdir -p "$PI_SWARM_INSTALL"
+# Supply a compatible Host first, then install the release alongside it.
+npm install --prefix "$PI_SWARM_INSTALL" --omit=dev --ignore-scripts=false --save-exact \
+  @earendil-works/pi-coding-agent@0.87.0 @earendil-works/pi-tui@0.87.0
+npm install --prefix "$PI_SWARM_INSTALL" --omit=dev --ignore-scripts=false \
+  /absolute/path/pi-messenger-swarm-0.26.3.tgz
+export PATH="$PI_SWARM_INSTALL/node_modules/.bin:$PATH"
+
+cd /absolute/path/to/target-git-project
+# Pi discovers pi.extensions from the installed package manifest.
+pi --extension "$PI_SWARM_INSTALL/node_modules/pi-messenger-swarm"
+# In another terminal with the same PATH, exercise the companion service:
+pi-messenger-swarm --start
+pi-messenger-swarm --project /absolute/path/to/target-git-project join
+pi-messenger-swarm --project /absolute/path/to/target-git-project status
+pi-messenger-swarm --stop
 ```
 
 Put this installation's `node_modules/.bin` on PATH when starting the companion CLI/service so spawned peers use the same Pi Host. A global `pi` executable by itself does not satisfy Node runtime imports. The package declares the Pi libraries as peers, so npm resolves them in the installation tree. Development remains `pnpm install`, `pnpm run build`.
+
+For maintainers, produce that tarball with `pnpm run build` followed by `npm pack`; `npm pack` alone does not compile the release. The supported peer range is `0.87.x`, with the smoke scenario pinned to Host/TUI `0.87.0`. Pi-Swarm does not bootstrap a standalone Pi environment. Normal installation scripts remain enabled; users do not need TypeScript, Vitest, or Git-hook tooling in the runtime installation.
 
 ## Project and run selection
 
@@ -50,6 +67,16 @@ Restoring never modifies the host or makes a Verified fact. Conflicts remain in 
 ## Runtime acceptance tests
 
 `npx vitest run tests/runtime/installed.test.ts` builds and packs the release, installs with `--omit=dev` and normal scripts, and exercises the installed CLI/service in independent Git repositories. Real installed Pi processes use a deterministic local model-provider fixture at the external model API boundary; delivery and recovery are not replaced by mocked internal callbacks. This is runtime-hardening evidence, not evidence of the separate Bohrium scientific benchmark's score or ranking.
+
+To run only the installation smoke scenario (no model credentials required):
+
+```sh
+npx vitest run tests/runtime/installed.test.ts -t 'loads the production extension'
+```
+
+The shared setup first installs the supplied Host/TUI, then the actual tarball in a temporary directory outside the checkout. The smoke probe uses Pi's public resource loader to discover the manifest's extension and checks that `/messenger` is registered without load errors. It verifies the installed peer versions and ranges, resolves ESM imports from both the extension and Host to compatible versions inside that installation, and checks that development tools are absent. `NODE_PATH` and `NODE_OPTIONS` are cleared for child processes. The installed CLI starts the real service; an HTTP health response proves readiness before `join` and `status` run with an explicit target project. The same installation and service are reused by the later runtime scenarios.
+
+Issue #8 smoke validation on 2026-09-29 used Node `24.13.0`, npm `11.6.2`, and explicitly supplied Host/TUI `0.87.0`. Both extension runtime imports resolved to the supplied top-level Host/TUI under the declared `0.87.x` peer contract. The Host's own TUI resolves to a nested `0.87.0` copy within the same installation; a shared TUI file is not required. Pi loaded `dist/index.js` with no errors and registered `/messenger`; the service returned HTTP 200 with `ok: true` and a live PID, `join` returned `Delegator`, and `status` returned the Goal view. The smoke test exited 0. The package contract itself was already present in the #7 changes; #8 strengthens the reproducible installation evidence and instructions.
 
 ### Verification record — 2026-09-29
 

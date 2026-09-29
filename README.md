@@ -118,6 +118,10 @@ Pi-Swarm 的整体设计并非零散功能的拼凑，而是一套**严密互扣
 
 ### 1. 安装与构建
 
+普通使用无需克隆源码：准备 Node.js ≥22.19 和 Pi Host/TUI 0.87.0，在同一个 npm 安装目录中安装 Host 和 Pi-Swarm 发布包。具体命令、依赖关系和安装包冒烟验证见[安装与运行说明](docs/runtime-hardening.md)。仅有全局 `pi` 命令不足以满足伴随服务的运行时依赖。
+
+从源码开发仍使用以下流程：
+
 ```bash
 # 克隆仓库
 git clone https://github.com/Azhi-ss/Pi-Swarm.git
@@ -127,7 +131,7 @@ cd Pi-Swarm
 pnpm install
 pnpm run build
 
-# 运行全量自动化测试 (55 个测试套件，435 项测试)
+# 运行全量自动化测试
 npx vitest run
 ```
 

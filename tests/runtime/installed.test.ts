@@ -17,7 +17,7 @@ let cli: string;
 let env: NodeJS.ProcessEnv;
 const run = (file: string, args: string[], cwd = project) =>
   exec(file, args, { cwd, env, timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
-const command = (...args: string[]) => run(process.execPath, [cli, ...args]);
+const command = (...args: string[]) => run(cli, args);
 async function coldRestart() {
   const previous = JSON.parse((await command('--status')).stdout).pid;
   process.kill(previous, 'SIGTERM');
@@ -61,6 +61,9 @@ beforeAll(async () => {
     PI_CODING_AGENT_DIR: path.join(root, 'pi'),
     PATH: path.join(install, 'node_modules/.bin') + path.delimiter + process.env.PATH,
     PI_MESSENGER_LOG: path.join(root, 'service.log'),
+    // Exclude module search paths/loaders inherited from the developer shell.
+    NODE_PATH: '',
+    NODE_OPTIONS: '',
   };
   for (const key of Object.keys(env)) if (key.startsWith('GIT_')) delete env[key];
   await run('git', ['init'], project);
@@ -83,14 +86,34 @@ beforeAll(async () => {
   const packed = { filename: fs.readdirSync(root).find((name) => name.endsWith('.tgz'))! };
   fs.writeFileSync(
     path.join(install, 'package.json'),
-    JSON.stringify({ private: true, type: 'module' })
+    JSON.stringify({
+      private: true,
+      type: 'module',
+      dependencies: {
+        '@earendil-works/pi-coding-agent': '0.87.0',
+        '@earendil-works/pi-tui': '0.87.0',
+      },
+    })
+  );
+  // Supply the supported host before adding the release artifact.
+  await run(
+    'npm',
+    ['install', '--omit=dev', '--ignore-scripts=false', '--no-audit', '--no-fund'],
+    install
   );
   await run(
     'npm',
-    ['install', '--omit=dev', '--no-audit', '--no-fund', path.join(root, packed.filename)],
+    [
+      'install',
+      '--omit=dev',
+      '--ignore-scripts=false',
+      '--no-audit',
+      '--no-fund',
+      path.join(root, packed.filename),
+    ],
     install
   );
-  cli = path.join(install, 'node_modules/pi-messenger-swarm/dist/harness/cli.js');
+  cli = path.join(install, 'node_modules/.bin/pi-messenger-swarm');
 }, 180_000);
 
 afterAll(async () => {
@@ -99,18 +122,57 @@ afterAll(async () => {
 });
 
 it('loads the production extension and starts its installed service in a separate project', async () => {
-  await run(
-    process.execPath,
-    [
-      '--input-type=module',
-      '-e',
-      "await import('./node_modules/pi-messenger-swarm/dist/index.js')",
-    ],
-    install
+  const supplied = JSON.parse(fs.readFileSync(path.join(install, 'package.json'), 'utf8'));
+  expect(supplied.dependencies).toMatchObject({
+    '@earendil-works/pi-coding-agent': '0.87.0',
+    '@earendil-works/pi-tui': '0.87.0',
+  });
+  // Let Pi discover the extension declared by the installed package manifest.
+  fs.copyFileSync(
+    path.join(import.meta.dirname, 'fixtures/inspect-installation.mjs'),
+    path.join(install, 'inspect-installation.mjs')
   );
+  const loaded = JSON.parse(
+    (
+      await run(process.execPath, [
+        '--experimental-import-meta-resolve',
+        path.join(install, 'inspect-installation.mjs'),
+      ])
+    ).stdout
+  );
+  expect(loaded.errors).toEqual([]);
+  expect(loaded.extensions).toEqual([
+    expect.objectContaining({
+      path: path.join(install, 'node_modules/pi-messenger-swarm/dist/index.js'),
+      commands: expect.arrayContaining(['messenger']),
+    }),
+  ]);
+  for (const dependency of ['@earendil-works/pi-coding-agent', '@earendil-works/pi-tui']) {
+    expect(loaded.peers[dependency]).toMatchObject({
+      version: '0.87.0',
+      range: '0.87.x',
+      hostVersion: '0.87.0',
+      suppliedByInstallation: true,
+    });
+    expect(
+      loaded.peers[dependency].resolved.startsWith(path.join(install, 'node_modules') + path.sep)
+    ).toBe(true);
+    expect(
+      loaded.peers[dependency].hostResolved.startsWith(
+        path.join(install, 'node_modules') + path.sep
+      )
+    ).toBe(true);
+  }
+  // Build tools must not be supplied by the production installation.
+  for (const dependency of ['typescript', 'vitest', 'simple-git-hooks']) {
+    expect(fs.existsSync(path.join(install, 'node_modules', dependency))).toBe(false);
+  }
   expect((await command('--start')).stdout).toContain('"ok":true');
-  expect((await command('join')).stdout).toContain('Delegator');
-  expect((await command('status')).stdout).toContain('Goal');
+  const readiness = await fetch(`http://127.0.0.1:${port}/health`);
+  expect(readiness.status).toBe(200);
+  expect(await readiness.json()).toMatchObject({ ok: true, pid: expect.any(Number) });
+  expect((await command('--project', project, 'join')).stdout).toContain('Delegator');
+  expect((await command('--project', project, 'status')).stdout).toContain('Goal');
 }, 30_000);
 
 it('rejects a missing target even when another project has already used the service', async () => {
