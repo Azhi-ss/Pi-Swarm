@@ -189,7 +189,7 @@ function buildSwarmProtocol(): string {
     '6. Ephemeral Focus & Clean Turn Completion: Once your milestone is verified, record the evidence and artifacts in the task record (`pi-messenger-swarm task done <taskId> "Evidence & summary"`), release held resources, and cleanly complete your turn. Do not spin or idle; next-generation peers will continue from the blackboard state.',
     '7. Self-Inspection: Run `pi-messenger-swarm status --self` to inspect your agentId, sandboxPath, currentTask, leaseExpiresIn (seconds), verificationAttempts, remainingRetries, lastError, and runtime port/testPort slots. Use the injected PORT, TEST_PORT and TMPDIR for work in your sandbox.',
     '8. Peer Discovery: Run `pi-messenger-swarm peers` to discover active peers, or `pi-messenger-swarm peers --task <taskId>` to find peers with a live claim on that task. Agree on interfaces before changing shared contracts.',
-    '9. Direct Signaling: Use `pi-messenger-swarm send <peer> "Contract or coordination message"` to append to that peer\'s .pi/messenger/inbox/<peer>.jsonl. Read your own inbox with `pi-messenger-swarm inbox` (or $PI_SWARM_INBOX) between milestones (a missing file means no messages yet). Messages are pull-based; check the inbox and feed yourself.',
+    '9. Direct Signaling: Use `pi-messenger-swarm send <peer> "Contract or coordination message"` to deliver an ordinary Peer Message. Read your own messages on demand with `pi-messenger-swarm inbox`, or the file at $PI_SWARM_INBOX, between milestones (a missing file means no messages yet). Ordinary messages are pull-based and do not interrupt your turn.',
   ].join('\n');
 }
 

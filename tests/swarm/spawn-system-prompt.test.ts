@@ -96,7 +96,9 @@ describe('swarm spawn system prompt', () => {
     expect(spawned.systemPrompt).toContain('pi-messenger-swarm status --self');
     expect(spawned.systemPrompt).toContain('pi-messenger-swarm peers --task <taskId>');
     expect(spawned.systemPrompt).toContain('pi-messenger-swarm send <peer>');
-    expect(spawned.systemPrompt).toContain('.pi/messenger/inbox/');
+    expect(spawned.systemPrompt).toContain('pi-messenger-swarm inbox');
+    expect(spawned.systemPrompt).toContain('$PI_SWARM_INBOX');
+    expect(spawned.systemPrompt).not.toContain('.pi/messenger/inbox/');
 
     proc.emit('close', 0);
     expect(fs.existsSync(path.dirname(promptPath))).toBe(false);

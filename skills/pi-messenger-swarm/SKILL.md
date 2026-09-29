@@ -244,26 +244,25 @@ Agents are instructed to write all findings into `task progress` and `task done`
 
 ## Storage layout
 
-Swarm data is **project-scoped by default** (isolated per project):
+Swarm messaging stays **project-scoped**. The default root is the owning Project's `.pi/messenger/`. `PI_MESSENGER_DIR` and `PI_MESSENGER_GLOBAL=1` select a shared storage root; registration, discovery, channels, and inboxes under that root stay partitioned by Project. Task records and spawn logs stay in the owning Project's `.pi/messenger/`. Read ordinary messages with `pi-messenger-swarm inbox`. A spawned peer's inbox file is `$PI_SWARM_INBOX`.
 
 ```
-.pi/messenger/
+<project-scoped messaging root>/
 ├── channels/
 │   └── <channel>.jsonl       # Metadata header (line 1) + feed events
-├── tasks/                    # Task event JSONL (per session)
-│   └── <session>.jsonl
-├── agents/                   # Spawn event JSONL (per session)
-│   └── <session>.jsonl
+├── registry/                 # Peer registration for this Project
+├── inbox/
+│   └── <peer>.jsonl          # Ordinary pull-based peer messages
 └── locks/                    # Race-safe coordination locks
 ```
 
 ### Override locations
 
 ```bash
-# Custom directory
+# Custom shared root; Projects stay partitioned
 PI_MESSENGER_DIR=/path/to/dir pi
 
-# Legacy global mode (all projects share state - not recommended)
+# Pi agent messenger directory as the shared root; Projects stay partitioned
 PI_MESSENGER_GLOBAL=1 pi
 ```
 

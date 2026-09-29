@@ -1,6 +1,7 @@
 /**
  * Project Context at the generated command wrapper, CLI, and service boundary.
  * The known-good workspace Pi runtime is reused; clean package installation is #8.
+ * Storage cases also cover sandbox task association and ordinary inbox delivery.
  */
 import { execFile } from 'node:child_process';
 import { createServer } from 'node:net';
@@ -239,3 +240,96 @@ it('reports a missing project and does not stop or change another project', asyn
   );
   expect((await invoke(target, ['task', 'list'])).stdout).not.toContain('Should not land');
 });
+
+it.each(['default', 'custom', 'global'] as const)(
+  'a sandbox peer claims the originating task and reads its inbox under %s storage',
+  async (storageMode) => {
+    const project = path.join(root, `${storageMode}-project`);
+    const other = path.join(root, `${storageMode}-other`);
+    const shared = path.join(root, `${storageMode}-shared`);
+    await initRepo(project);
+    await initRepo(other);
+    const packageRoot = fs.realpathSync(packageCheckout);
+    const storage = {
+      PI_MESSENGER_DIR: storageMode === 'custom' ? shared : '',
+      PI_MESSENGER_GLOBAL: storageMode === 'global' ? '1' : '0',
+      PI_SWARM_PROJECT_ROOT: '',
+      PI_SWARM_INBOX: '',
+      PI_MESSENGER_CWD: packageRoot,
+      PI_MESSENGER_CHANNEL: '',
+    };
+    const as = (name: string) => ({ ...storage, PI_AGENT_NAME: name });
+    const sandbox = createWorktree(project, `peer-${storageMode}`, 'Worker');
+    expect(sandbox.isGitWorktree).toBe(true);
+    expect(sandbox.worktreePath).toContain(
+      `${path.sep}.swarm${path.sep}workspaces${path.sep}worker-peer-${storageMode}`
+    );
+    try {
+      await invoke(
+        project,
+        ['run', 'start', '--goal', `${storageMode} originating goal`],
+        as('Delegator')
+      );
+      await invoke(project, ['join'], as('Delegator'));
+      expect(
+        (
+          await invoke(
+            project,
+            ['task', 'create', '--title', `${storageMode} originating task`],
+            as('Delegator')
+          )
+        ).stdout
+      ).toContain(`${storageMode} originating task`);
+
+      expect((await invoke(sandbox.worktreePath, ['join'], as('Worker'))).stdout).toContain(
+        'Joined as Worker'
+      );
+      expect((await invoke(sandbox.worktreePath, ['task', 'list'], as('Worker'))).stdout).toContain(
+        `${storageMode} originating task`
+      );
+      expect(
+        (await invoke(sandbox.worktreePath, ['task', 'claim', 'task-1'], as('Worker'))).stdout
+      ).toContain('Claimed task-1');
+      expect((await invoke(project, ['task', 'list'], as('Delegator'))).stdout).toContain(
+        '[Worker]'
+      );
+
+      expect(
+        (
+          await invoke(
+            project,
+            ['send', 'Worker', `${storageMode} private contract`],
+            as('Delegator')
+          )
+        ).stdout
+      ).toContain('inbox');
+      expect((await invoke(sandbox.worktreePath, ['inbox'], as('Worker'))).stdout).toContain(
+        `${storageMode} private contract`
+      );
+      expect(fs.existsSync(path.join(project, '.pi', 'messenger', 'inbox', 'Worker.jsonl'))).toBe(
+        false
+      );
+      if (storageMode === 'custom') {
+        expect(fs.existsSync(path.join(shared, 'inbox', 'Worker.jsonl'))).toBe(false);
+      }
+
+      await invoke(other, ['run', 'start', '--goal', `${storageMode} other goal`], as('Worker'));
+      await invoke(other, ['join'], as('Worker'));
+      const foreignTasks = await invoke(other, ['task', 'list'], as('Worker'));
+      expect(foreignTasks.stdout).not.toContain(`${storageMode} originating task`);
+      expect((await invoke(other, ['inbox'], as('Worker'))).stdout).not.toContain(
+        `${storageMode} private contract`
+      );
+      await invoke(other, ['join'], as('Scout'));
+      expect((await invoke(other, ['peers'], as('Scout'))).stdout).not.toContain('Delegator');
+      expect((await invoke(project, ['peers'], as('Delegator'))).stdout).toContain('Worker');
+      expect((await invoke(project, ['peers'], as('Delegator'))).stdout).not.toContain('Scout');
+
+      await invoke(project, ['abort'], as('Delegator'));
+      await invoke(other, ['abort'], as('Worker'));
+    } finally {
+      removeWorktree(project, sandbox);
+    }
+  },
+  60_000
+);

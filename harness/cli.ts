@@ -507,8 +507,8 @@ Project selection, with no confirmation prompt:
 Environment:
   PI_MESSENGER_PORT     Server port (default: 9877)
   PI_MESSENGER_LOG      Log file (default: /tmp/pi-messenger-swarm.log)
-  PI_MESSENGER_DIR     Data directory (project-scoped by default)
-  PI_MESSENGER_GLOBAL  Use global data directory if set
+  PI_MESSENGER_DIR     Shared storage root (Projects stay partitioned; default is <project>/.pi/messenger)
+  PI_MESSENGER_GLOBAL  Set to 1 to use the Pi agent messenger directory as that shared root
 `);
     return;
   }

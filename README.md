@@ -167,7 +167,7 @@ pi-messenger-swarm send PeerName "接口约定：GET /v1/items 返回 JSON 数�
 
 `status --self` 中的 `leaseExpiresIn` 以秒计，`remainingRetries` 表示触发三次失败剪枝前剩余的验证次数；没有当前任务、沙箱或端口时，对应字段为 `null`。`peers` 返回当前项目注册表中的其他在线非人类节点，任务来自当前会话，过期租约不计入当前认领。
 
-定向消息逐条追加到宿主项目的 `.pi/messenger/inbox/<节点名称>.jsonl`，不会写入公共动态；离线收件人的消息保留在磁盘。节点按需读取自己的收件箱，新派生节点可通过 `$PI_SWARM_PROJECT_ROOT` 定位宿主目录。向 `#channel` 发送消息仍然发布到频道动态。
+定向消息写入收件人在当前项目中的收件箱，不会写入公共动态；离线收件人的消息保留在磁盘。用 `pi-messenger-swarm inbox` 按需读取。派生节点的收件箱文件是 `$PI_SWARM_INBOX`，宿主项目是 `$PI_SWARM_PROJECT_ROOT`。自定义或全局存储根仍按项目分区，同名节点不会共用一个收件箱。向 `#channel` 发送消息仍然发布到频道动态。
 
 观察者无需先 `join`，可直接使用三个命令：
 

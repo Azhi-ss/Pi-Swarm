@@ -38,7 +38,7 @@ A command selects one Project and uses it immediately, with no confirmation prom
 
 A nested directory and a Sandbox both resolve to that owning Project. When none of the three selectors identify a Project, project-scoped commands exit with `Missing Project Context: run inside a Project or use --project <path>.` They do not select a last-used Project, the package installation directory, `PI_MESSENGER_CWD`, or the directory where the service process started, and they do not change or stop any other Project.
 
-`PI_MESSENGER_DIR` and `PI_MESSENGER_GLOBAL=1` select a storage root, not the Project. The Project records that selection locally; messaging below shared roots is partitioned by canonical Project path and run ID. Task and recovery evidence remains under the owning Project. Changing an established storage root requires an explicit migration; the runtime refuses a silent switch. Read ordinary messages with `pi-messenger-swarm inbox`.
+`PI_MESSENGER_DIR` and `PI_MESSENGER_GLOBAL=1` select a storage root, not the Project. The Project records that selection locally; registration, discovery, channels, and inboxes below shared roots are partitioned by canonical Project path and run ID. A peer started in an assigned Sandbox resolves that owning Project, finds the originating task, and claims it. Task and recovery evidence remains under the owning Project. Changing an established storage root requires an explicit migration; the runtime refuses a silent switch. Read ordinary messages with `pi-messenger-swarm inbox`; a spawned peer's inbox file is `$PI_SWARM_INBOX`. Ordinary messages stay pull-based.
 
 ```sh
 pi-messenger-swarm run start --goal "Implement the accepted specification" --max-steps 50 --concurrency 3 --verify "npm run acceptance"
