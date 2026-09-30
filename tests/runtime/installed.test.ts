@@ -442,11 +442,37 @@ it('actively delivers a verification failure to a real installed Pi host, while 
       async () =>
         expect(JSON.parse((await peer('notifications')).stdout)).toEqual(
           expect.arrayContaining([
-            expect.objectContaining({ to: 'Receiver', taskId: 'task-1', status: 'handled' }),
+            expect.objectContaining({
+              id: 'verif-task-1-1',
+              project,
+              runId: beforeRestart.id,
+              to: 'Receiver',
+              taskId: 'task-1',
+              status: 'handled',
+            }),
           ])
         ),
       { timeout: 10_000 }
     );
+    expect(
+      requests.some(
+        (raw) =>
+          raw.includes('[Verification Failed]') &&
+          raw.includes('Exit Code: 7') &&
+          raw.includes(`Task: task-1`) &&
+          raw.includes(`Run: ${beforeRestart.id}`) &&
+          raw.includes(`Project: ${project}`) &&
+          raw.includes('Incident: verif-task-1-1')
+      )
+    ).toBe(true);
+    const handledOnce = requests.length;
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    expect(requests.length).toBe(handledOnce);
+    expect(
+      JSON.parse((await peer('notifications')).stdout).filter(
+        (n: { id: string }) => n.id === 'verif-task-1-1'
+      )
+    ).toHaveLength(1);
     const delegator = spawn(
       path.join(install, 'node_modules/.bin/pi'),
       [
@@ -480,6 +506,15 @@ it('actively delivers a verification failure to a real installed Pi host, while 
         () => expect(handled.includes('HANDLED_ALL_DEAD'), handled.slice(-1500)).toBe(true),
         { timeout: 15_000 }
       );
+      expect(
+        requests.some(
+          (raw) =>
+            raw.includes('All-Dead Attribution Brief') &&
+            raw.includes(`Project: ${project}`) &&
+            raw.includes(`Run: ${beforeRestart.id}`) &&
+            raw.includes('Recipient: Delegator')
+        )
+      ).toBe(true);
       expect((await command('run', 'status')).stdout).toContain('Awaiting Handoff');
     } finally {
       delegator.kill('SIGTERM');
@@ -985,3 +1020,388 @@ it('kills the selected run evaluator before a later run can be affected', async 
   });
   await command('abort');
 }, 20_000);
+
+it('keeps a verification failure pending when no Pi recipient is alive', async () => {
+  await command('abort').catch(() => {});
+  const started = JSON.parse(
+    (await command('run', 'start', '--goal', 'Pending critical delivery')).stdout
+  );
+  await command('run', 'join');
+  await command('task', 'create', '--title', 'Nobody is listening');
+  await command('task', 'claim', 'task-1');
+  const failed = await command(
+    'task',
+    'done',
+    'task-1',
+    'missing recipient',
+    '--verify',
+    'node -e "process.exit(7)"'
+  ).then(
+    () => {
+      throw new Error('verification failure was reported as success');
+    },
+    (error: { code?: number; stderr?: string }) => error
+  );
+  expect(failed.code).toBe(1);
+  expect(failed.stderr).toContain('exit code 7');
+  const notes = JSON.parse((await command('notifications')).stdout);
+  expect(notes).toEqual([
+    expect.objectContaining({
+      id: 'verif-task-1-1',
+      project,
+      runId: started.id,
+      to: 'Delegator',
+      taskId: 'task-1',
+      status: 'pending',
+    }),
+  ]);
+  expect(notes[0].text).toContain('Exit Code: 7');
+  expect(notes[0].text).toContain(`Run: ${started.id}`);
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  expect(JSON.parse((await command('notifications')).stdout)[0].status).toBe('pending');
+  await command('abort');
+});
+
+it('delivers a merge conflict to the live peer and still rebases onto the evolved host', async () => {
+  await command('abort').catch(() => {});
+  await run('git', ['config', 'user.name', 'Test']);
+  await run('git', ['config', 'user.email', 'test@example.test']);
+  fs.writeFileSync(path.join(project, 'shared.txt'), 'base\n');
+  await run('git', ['add', 'shared.txt']);
+  await run('git', ['commit', '-m', 'shared base']);
+  const requests: string[] = [];
+  const provider = createHttpServer(async (req, res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    requests.push(raw);
+    const conflict = raw.includes('Incident: conflict-task-1-1');
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    const deltas = conflict
+      ? [
+          { role: 'assistant', content: 'HANDLED_CONFLICT' },
+          {
+            tool_calls: [
+              {
+                index: 0,
+                id: `call_${requests.length}`,
+                type: 'function',
+                function: {
+                  name: 'bash',
+                  arguments: JSON.stringify({ command: 'sleep 25', timeout: 40 }),
+                },
+              },
+            ],
+          },
+        ]
+      : [
+          {
+            role: 'assistant',
+            tool_calls: [
+              {
+                index: 0,
+                id: `call_${requests.length}`,
+                type: 'function',
+                function: {
+                  name: 'bash',
+                  arguments: JSON.stringify({
+                    command: 'pi-messenger-swarm run join && echo READY && sleep 12',
+                    timeout: 30,
+                  }),
+                },
+              },
+            ],
+          },
+        ];
+    for (const choice of [
+      ...deltas.map((delta) => ({ delta, finish_reason: null })),
+      { delta: {}, finish_reason: 'tool_calls' as const },
+    ])
+      res.write(
+        'data: ' +
+          JSON.stringify({
+            id: 'conflict',
+            object: 'chat.completion.chunk',
+            created: 1,
+            model: 'fixture',
+            choices: [{ index: 0, ...choice }],
+          }) +
+          '\n\n'
+      );
+    res.end('data: [DONE]\n\n');
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  fs.writeFileSync(
+    path.join(env.PI_CODING_AGENT_DIR!, 'models.json'),
+    JSON.stringify({
+      providers: {
+        fixture: {
+          baseUrl: `http://127.0.0.1:${(provider.address() as { port: number }).port}/v1`,
+          api: 'openai-completions',
+          apiKey: 'fixture',
+          models: [{ id: 'fixture', contextWindow: 128000, maxTokens: 2048 }],
+        },
+      },
+    })
+  );
+  const started = JSON.parse(
+    (await command('run', 'start', '--goal', 'Deliver the merge conflict', '--max-steps', '20'))
+      .stdout
+  );
+  await command('run', 'join');
+  await command('task', 'create', '--title', 'Edit shared');
+  const merger = (...args: string[]) =>
+    exec(process.execPath, [cli, ...args], {
+      cwd: project,
+      env: { ...env, PI_AGENT_NAME: 'Merger' },
+      timeout: 20_000,
+    });
+  try {
+    await command(
+      'spawn',
+      '--task-id',
+      'task-1',
+      '--name',
+      'Merger',
+      '--model',
+      'fixture/fixture',
+      'Hold for conflict'
+    );
+    const listed = (await command('spawn', 'list')).stdout;
+    const id = listed.match(/^- (\w+): Merger /m)?.[1];
+    expect(id, listed).toBeTruthy();
+    const sandbox = path.join(project, '.swarm', 'workspaces', `worker-${id}`);
+    await vi.waitFor(
+      async () => expect((await command('ps', 'logs', id!)).stdout).toContain('READY'),
+      {
+        timeout: 15_000,
+      }
+    );
+    fs.writeFileSync(path.join(sandbox, 'shared.txt'), 'sandbox\n');
+    fs.writeFileSync(path.join(project, 'shared.txt'), 'host\n');
+    await run('git', ['add', 'shared.txt']);
+    await run('git', ['commit', '-m', 'host evolves shared']);
+    await merger('task', 'claim', 'task-1');
+    const collided = await merger(
+      'task',
+      'done',
+      'task-1',
+      'try merge',
+      '--verify',
+      'node -e "process.exit(0)"'
+    ).then(
+      () => {
+        throw new Error('merge conflict was reported as success');
+      },
+      (error: { code?: number; stderr?: string }) => error
+    );
+    expect(collided.code).toBe(1);
+    expect(collided.stderr).toContain(
+      'Main branch evolved with conflicts. Rebase your sandbox onto latest HEAD and re-verify!'
+    );
+    await vi.waitFor(
+      async () => expect((await command('ps', 'logs', id!)).stdout).toContain('HANDLED_CONFLICT'),
+      { timeout: 30_000 }
+    );
+    const notes = JSON.parse((await merger('notifications')).stdout);
+    expect(notes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'conflict-task-1-1',
+          project,
+          runId: started.id,
+          to: 'Merger',
+          taskId: 'task-1',
+          status: 'handled',
+        }),
+      ])
+    );
+    const seen = requests.filter((raw) => raw.includes('Incident: conflict-task-1-1')).length;
+    expect(seen).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(requests.filter((raw) => raw.includes('Incident: conflict-task-1-1')).length).toBe(1);
+    const head = (await run('git', ['rev-parse', 'HEAD'])).stdout.trim();
+    await run('git', ['reset', '--soft', head], sandbox);
+    await merger('task', 'done', 'task-1', 'rebased', '--verify', 'node -e "process.exit(0)"');
+    expect(fs.readFileSync(path.join(project, 'shared.txt'), 'utf8')).toBe('sandbox\n');
+    expect((await run('git', ['status', '--porcelain'])).stdout).not.toContain('shared.txt');
+  } finally {
+    await command('abort').catch(() => {});
+    provider.closeAllConnections();
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
+  }
+}, 70_000);
+
+it('does not deliver a critical incident to the same peer name in another project or a later run', async () => {
+  await command('abort').catch(() => {});
+  const storage = path.join(root, 'shared-critical');
+  fs.mkdirSync(storage, { recursive: true });
+  const alpha = path.join(root, 'alpha-project');
+  const side = path.join(root, 'side-project');
+  fs.mkdirSync(alpha);
+  fs.mkdirSync(side);
+  const sideEnv = { ...env, PI_MESSENGER_DIR: storage };
+  const alphaEnv = { ...env, PI_MESSENGER_DIR: storage, PI_AGENT_NAME: 'Twin' };
+  const sideCmd = (...args: string[]) =>
+    exec(process.execPath, [cli, ...args], { cwd: side, env: sideEnv, timeout: 20_000 });
+  const homeCmd = (...args: string[]) =>
+    exec(process.execPath, [cli, ...args], { cwd: alpha, env: alphaEnv, timeout: 20_000 });
+  for (const dir of [alpha, side]) {
+    await run('git', ['init'], dir);
+    await run(
+      'git',
+      [
+        '-c',
+        'user.email=test@example.test',
+        '-c',
+        'user.name=Test',
+        'commit',
+        '--allow-empty',
+        '-m',
+        'init',
+      ],
+      dir
+    );
+  }
+  const first = JSON.parse(
+    (await homeCmd('run', 'start', '--goal', 'Isolate critical delivery')).stdout
+  );
+  await homeCmd('run', 'join');
+  await homeCmd('task', 'create', '--title', 'Owned by Twin');
+  await homeCmd('task', 'claim', 'task-1');
+  await expect(
+    homeCmd('task', 'done', 'task-1', 'fail', '--verify', 'node -e "process.exit(7)"')
+  ).rejects.toMatchObject({ code: 1 });
+  const requests: string[] = [];
+  const provider = createHttpServer(async (req, res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    requests.push(raw);
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    for (const choice of [
+      { delta: { role: 'assistant', content: 'READY' }, finish_reason: null },
+      { delta: {}, finish_reason: 'stop' },
+    ])
+      res.write(
+        'data: ' +
+          JSON.stringify({
+            id: 'isolate',
+            object: 'chat.completion.chunk',
+            created: 1,
+            model: 'fixture',
+            choices: [{ index: 0, ...choice }],
+          }) +
+          '\n\n'
+      );
+    res.end('data: [DONE]\n\n');
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  fs.writeFileSync(
+    path.join(env.PI_CODING_AGENT_DIR!, 'models.json'),
+    JSON.stringify({
+      providers: {
+        fixture: {
+          baseUrl: `http://127.0.0.1:${(provider.address() as { port: number }).port}/v1`,
+          api: 'openai-completions',
+          apiKey: 'fixture',
+          models: [{ id: 'fixture', contextWindow: 128000, maxTokens: 1024 }],
+        },
+      },
+    })
+  );
+  const other = spawn(
+    path.join(install, 'node_modules/.bin/pi'),
+    [
+      '--mode',
+      'rpc',
+      '--no-session',
+      '--no-skills',
+      '--extension',
+      path.join(install, 'node_modules/pi-messenger-swarm/dist/index.js'),
+      '--provider',
+      'fixture',
+      '--model',
+      'fixture',
+    ],
+    { cwd: side, env: { ...sideEnv, PI_AGENT_NAME: 'Twin' }, stdio: 'pipe' }
+  );
+  let output = '';
+  other.stdout.on('data', (c) => (output += c));
+  other.stderr.on('data', (c) => (output += c));
+  const exited = once(other, 'exit');
+  try {
+    await sideCmd('run', 'start', '--goal', 'Other project');
+    await sideCmd('run', 'join');
+    other.stdin.write(JSON.stringify({ type: 'prompt', message: 'ready' }) + '\n');
+    await vi.waitFor(() => expect(output.includes('READY'), output.slice(-1500)).toBe(true), {
+      timeout: 15_000,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    expect(output).not.toContain('Incident: verif-task-1-1');
+    expect(requests.some((raw) => raw.includes('Incident: verif-task-1-1'))).toBe(false);
+    expect(JSON.parse((await sideCmd('notifications')).stdout)).toEqual([]);
+    expect(JSON.parse((await homeCmd('notifications', '--run', first.id)).stdout)).toEqual([
+      expect.objectContaining({
+        id: 'verif-task-1-1',
+        project: alpha,
+        runId: first.id,
+        status: 'pending',
+      }),
+    ]);
+    other.kill('SIGTERM');
+    await exited;
+    await homeCmd('abort');
+    const later = JSON.parse(
+      (await homeCmd('run', 'start', '--goal', 'Later run same peer')).stdout
+    );
+    await homeCmd('run', 'join');
+    const again = spawn(
+      path.join(install, 'node_modules/.bin/pi'),
+      [
+        '--mode',
+        'rpc',
+        '--no-session',
+        '--no-skills',
+        '--extension',
+        path.join(install, 'node_modules/pi-messenger-swarm/dist/index.js'),
+        '--provider',
+        'fixture',
+        '--model',
+        'fixture',
+      ],
+      {
+        cwd: alpha,
+        env: alphaEnv,
+        stdio: 'pipe',
+      }
+    );
+    let laterOut = '';
+    again.stdout.on('data', (c) => (laterOut += c));
+    again.stderr.on('data', (c) => (laterOut += c));
+    const againExit = once(again, 'exit');
+    try {
+      again.stdin.write(JSON.stringify({ type: 'prompt', message: 'ready later' }) + '\n');
+      await vi.waitFor(() => expect(laterOut.includes('READY'), laterOut.slice(-1500)).toBe(true), {
+        timeout: 15_000,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      expect(laterOut).not.toContain('Incident: verif-task-1-1');
+      expect(JSON.parse((await homeCmd('notifications')).stdout)).toEqual([]);
+      expect(JSON.parse((await homeCmd('notifications', '--run', first.id)).stdout)[0].status).toBe(
+        'pending'
+      );
+      expect(later.id).not.toBe(first.id);
+    } finally {
+      again.kill('SIGTERM');
+      await againExit;
+    }
+  } finally {
+    other.kill('SIGTERM');
+    await exited.catch(() => {});
+    await homeCmd('abort').catch(() => {});
+    await sideCmd('abort').catch(() => {});
+    provider.closeAllConnections();
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
+  }
+}, 60_000);

@@ -25,7 +25,14 @@ function notify(cwd: string, runId: string, to: string, id: string, text: string
   enqueueCritical(
     cwd,
     runId,
-    { id, from: 'watchdog', to, text, timestamp: new Date().toISOString(), replyTo: null },
+    {
+      id,
+      from: 'watchdog',
+      to,
+      text: `Project: ${cwd}\nRun: ${runId}\nRecipient: ${to}\n${taskId ? `Task: ${taskId}\n` : ''}${text}`,
+      timestamp: new Date().toISOString(),
+      replyTo: null,
+    },
     taskId
   );
 }

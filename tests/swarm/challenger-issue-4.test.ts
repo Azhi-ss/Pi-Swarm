@@ -123,9 +123,10 @@ describe('Adversarial Challenge: Issue #4 Rebase-on-Conflict & Fast Pruning Prot
       expect(deliveredMessages.length).toBeGreaterThan(0);
       const steer = deliveredMessages.find((m) => m.to === 'WorkerBeta');
       expect(steer).toBeDefined();
-      expect(steer!.text).toBe(
+      expect(steer!.text).toContain(
         'Main branch evolved with conflicts. Rebase your sandbox onto latest HEAD and re-verify!'
       );
+      expect(steer!.text).toContain(`Run: ${sessionId}`);
       expect((steer as any).triggerTurn).toBe(true);
       expect(steer!.from).toBe('verifier');
 
@@ -330,10 +331,11 @@ describe('Adversarial Challenge: Issue #4 Rebase-on-Conflict & Fast Pruning Prot
       expect(deliveredMessages.length).toBe(1);
 
       const steer = deliveredMessages[0];
-      // 1. Text must STRICTLY match verbatim
       const expectedText =
         'Main branch evolved with conflicts. Rebase your sandbox onto latest HEAD and re-verify!';
-      expect(steer.text).toBe(expectedText);
+      expect(steer.text).toContain(expectedText);
+      expect(steer.text).toContain(`Run: ${sessionId}`);
+      expect(steer.text).toContain('Incident: conflict-');
 
       // 2. triggerTurn must be strictly true to force agent turn
       expect((steer as any).triggerTurn).toBe(true);

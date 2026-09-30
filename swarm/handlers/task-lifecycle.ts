@@ -331,11 +331,12 @@ export function taskDone(
       // Deliver steer message to drive autonomous self-healing
       if (deliverMessage) {
         try {
+          const incident = `verif-${existing.id}-${attempt}`;
           deliverMessage({
-            id: `verif-${existing.id}-${Date.now()}`,
+            id: incident,
             from: 'verifier',
             to: state.agentName,
-            text: `🚨 [Verification Failed] Task ${existing.id} completion rejected (Attempt ${attempt}/${maxAttempts}):\nCommand: ${verifyCommand}\nExit Code: ${verifRes.exitCode}\n\n${output}`,
+            text: `🚨 [Verification Failed] Task ${existing.id} completion rejected (Attempt ${attempt}/${maxAttempts}):\nCommand: ${verifyCommand}\nExit Code: ${verifRes.exitCode}\n\n${output}\nTask: ${existing.id}\nRun: ${sessionId}\nProject: ${cwd}\nIncident: ${incident}`,
             timestamp: new Date().toISOString(),
             replyTo: null,
             channel: channelId,
@@ -483,11 +484,12 @@ export function taskDone(
       // "Main branch evolved with conflicts. Rebase your sandbox onto latest HEAD and re-verify!" (with triggerTurn: true).
       if (deliverMessage) {
         try {
+          const incident = `conflict-${existing.id}-${attempt}`;
           deliverMessage({
-            id: `steer-collision-${existing.id}-${Date.now()}`,
+            id: incident,
             from: 'verifier',
             to: state.agentName,
-            text: 'Main branch evolved with conflicts. Rebase your sandbox onto latest HEAD and re-verify!',
+            text: `Main branch evolved with conflicts. Rebase your sandbox onto latest HEAD and re-verify!\nTask: ${existing.id}\nRun: ${sessionId}\nProject: ${cwd}\nIncident: ${incident}`,
             timestamp: new Date().toISOString(),
             replyTo: null,
             channel: channelId,
