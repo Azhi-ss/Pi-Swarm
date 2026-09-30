@@ -77,6 +77,7 @@ function limitLines(cwd: string): string[] {
   if (!active && run.status !== 'aborted' && !run.stopReason) return [];
   const remaining = Math.max(0, run.maxSteps - run.consumedSteps);
   const lines = [`Budget: ${remaining}/${run.maxSteps} steps remaining`];
+  if (!active) lines.push(`Stopped run: ${run.id}`);
   if (run.stopReason) lines.push(`Stop reason: ${run.stopReason}`);
   return lines;
 }

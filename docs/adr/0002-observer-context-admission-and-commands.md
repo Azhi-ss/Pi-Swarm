@@ -10,7 +10,7 @@ We established three canonical interaction commands:
 
 - **`status`**: Renders a compact ANSI card of the four-zone blackboard snapshot and active worker PIDs.
 - **`explain`**: Directs the Delegator to analyze `BLACKBOARD.md` and deliver an objective, human-readable situation briefing (verified milestones, active hypotheses, disproved dead-ends).
-- **`abort`**: Fires `SIG_ABORT`, triggering the Watchdog to batch-kill all sandbox process groups and reclaim worktrees immediately.
+- **`abort`**: Fires `SIG_ABORT` for the selected Project's Swarm Run, killing that run's peer process groups and reclaiming its Sandboxes. Other Projects keep running.
 
 ## Consequences
 

@@ -95,7 +95,7 @@ A structured summary (≤1500 tokens) of all failed hypotheses, their error stac
 _Avoid_: Error report, post-mortem, incident report
 
 **Circuit Breaker**:
-A global step-count budget (default 50 tool invocations across the entire swarm). When the budget is exhausted, the breaker fires `swarm.abort`, kills all peers, and locks the Blackboard to preserve any verified results.
+A step-count budget on the Project's active Swarm Run (default 50 tool invocations). When that run's budget is exhausted, the breaker fires `swarm.abort`, kills that run's peer process groups, and locks the Blackboard to preserve verified results. Other Projects are unchanged.
 _Avoid_: Rate limiter, throttle, quota (it's a hard stop, not a slowdown)
 
 ### Merge & Delivery

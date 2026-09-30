@@ -170,7 +170,7 @@ it('scopes budget, emergency stop, and supervision to the owning run', async () 
     (
       await invoke(
         projectB,
-        ['run', 'start', '--goal', 'Bound project B', '--max-steps', '4', '--concurrency', '1'],
+        ['run', 'start', '--goal', 'Bound project B', '--max-steps', '4', '--concurrency', '2'],
         as('Delegator')
       )
     ).stdout
@@ -281,6 +281,7 @@ it('scopes budget, emergency stop, and supervision to the owning run', async () 
   for (const command of ['status', 'explain'] as const) {
     const output = (await invoke(projectA, [command], as('Observer'))).stdout;
     expect(output).toContain('Budget: 0/4 steps remaining');
+    expect(output).toContain(`Stopped run: ${runA.id}`);
     expect(output).toContain('Stop reason: Global step budget exceeded (4/4 steps)');
     expect(output).toContain('Verified parser fact');
     expect(output).not.toContain(`PID ${leaderA}`);
@@ -298,6 +299,20 @@ it('scopes budget, emergency stop, and supervision to the owning run', async () 
     stderr: expect.stringContaining('no longer active'),
   });
 
+  const spawnedLater = await invoke(
+    projectB,
+    ['spawn', '--name', 'PeerB2', 'Admitted after A stopped'],
+    as('Delegator')
+  );
+  expect(spawnedLater.stdout).toContain('Spawned');
+  await vi.waitFor(() =>
+    expect(fs.readFileSync(path.join(projectB, '.pi', 'stub-child.pid'), 'utf8').trim()).not.toBe(
+      String(childB)
+    )
+  );
+  const childB2 = Number(fs.readFileSync(path.join(projectB, '.pi', 'stub-child.pid'), 'utf8'));
+  childPids.push(childB2);
+  expect(processGone(childB2)).toBe(false);
   await invoke(projectB, ['task', 'create', '--title', 'Still admissible'], as('Delegator'));
   expect((await invoke(projectB, ['task', 'claim', 'task-1'], as('Delegator'))).stdout).toContain(
     'task-1'
