@@ -5,7 +5,14 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { readRun, updateRun, endRun, type HandoffState } from './run-store.js';
-import { listSpawned, spawnSubagent, reconcileSpawnedAgents, stopSpawn } from './spawn.js';
+import {
+  listSpawned,
+  spawnSubagent,
+  reconcileSpawnedAgents,
+  stopSpawn,
+  recordSpawnError,
+  PRESERVATION_FAILED,
+} from './spawn.js';
 import { replayTasks, appendTaskEvent } from './task-store/events.js';
 import { getAllTasks } from './task-store/queries.js';
 import { writeBlackboard } from './task-store/blackboard.js';
@@ -92,15 +99,24 @@ export function recoverRun(cwd: string): void {
   let peers = listSpawned(cwd, run.id, true);
   const live = (peer: (typeof peers)[number]) =>
     peer.status === 'running' && !!peer.pid && isProcessAlive(peer.pid);
+  const retained = new Set<string>();
   for (const peer of peers) {
     if (live(peer) || peer.stopRequested || !peer.worktreePath || !fs.existsSync(peer.worktreePath))
       continue;
-    preserveCandidate(peer); // An error retains the Sandbox and prevents replacement this tick.
+    try {
+      preserveCandidate(peer);
+    } catch (error) {
+      // The Sandbox is retained and only this peer's task waits for repair.
+      if (peer.taskId) retained.add(peer.taskId);
+      if (!peer.error?.startsWith(PRESERVATION_FAILED))
+        recordSpawnError(cwd, run.id, peer.id, `${PRESERVATION_FAILED}: ${String(error)}`);
+      continue;
+    }
     removeWorktree(cwd, peer.id);
   }
   const tasks = replayTasks(cwd, run.id);
   for (const task of tasks) {
-    if (!['todo', 'staked', 'in_progress'].includes(task.status)) continue;
+    if (!['todo', 'staked', 'in_progress'].includes(task.status) || retained.has(task.id)) continue;
     const bound = peers.filter((p) => p.taskId === task.id);
     const latest = bound.sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0];
     if (!latest || latest.stopRequested) continue;

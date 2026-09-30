@@ -417,6 +417,8 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
         sessionId,
         { pollIntervalMs: 5000, leaseTtlSeconds: 300 },
         (payload) => {
+          // An active run delivers all-dead once, as an acknowledged Critical Notification.
+          if (activeRunId(project)) return;
           void pi.sendMessage(
             {
               customType: payload.customType,
