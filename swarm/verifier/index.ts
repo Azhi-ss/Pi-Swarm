@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawnSync, type SpawnSyncOptionsWithStringEncoding } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
@@ -45,6 +45,8 @@ export function runVerification(
   let errorMsg: string | undefined;
 
   try {
+    // A timeout kills only the shell. Its own process group lets the whole
+    // tree be reaped, including background processes left after a normal exit.
     const res = spawnSync(command, {
       cwd,
       shell: true,
@@ -52,7 +54,15 @@ export function runVerification(
       maxBuffer: 4 * 1024 * 1024,
       encoding: 'utf-8',
       env: process.env,
-    });
+      detached: process.platform !== 'win32',
+    } as SpawnSyncOptionsWithStringEncoding);
+    if (res.pid && process.platform !== 'win32') {
+      try {
+        process.kill(-res.pid, 'SIGKILL');
+      } catch {
+        // The group is already empty.
+      }
+    }
 
     stdout = res.stdout ?? '';
     stderr = res.stderr ?? '';
