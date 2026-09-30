@@ -87,42 +87,48 @@ export function runVerification(
   };
 }
 
+/** Dependency and runtime directories stay out of patches so a merge cannot rewrite them. */
+export const PATCH_EXCLUDES = [
+  ':(exclude).pi',
+  ':(exclude).swarm',
+  ':(exclude)BLACKBOARD.md',
+  ':(exclude)node_modules',
+];
+
 /**
  * Generate a .patch artifact from git diff HEAD and save to .pi/messenger/artifacts/<taskId>.patch.
  * Returns the relative path to the generated patch file, or null if no diff or not in git.
  */
 export function generatePatch(cwd: string, taskId: string, outputRoot?: string): string | null {
+  const gitCheck = spawnSync('git rev-parse --is-inside-work-tree', {
+    cwd,
+    shell: true,
+    encoding: 'utf-8',
+  });
+  if (gitCheck.status !== 0 || gitCheck.stdout.trim() !== 'true') {
+    return null;
+  }
+
+  // Intent-to-add captures new source files; without it they would silently
+  // drop out of a patch that is still merged. Only listed files are added,
+  // because git add exits 1 when an excluded path is also gitignored.
+  const listed = spawnSync(
+    'git',
+    ['ls-files', '--others', '--exclude-standard', '-z', '--', '.', ...PATCH_EXCLUDES],
+    { cwd, encoding: 'utf-8', maxBuffer: 32 * 1024 * 1024 }
+  );
+  const added =
+    listed.status === 0 && listed.stdout
+      ? spawnSync('git', ['add', '-N', '--pathspec-from-file=-', '--pathspec-file-nul'], {
+          cwd,
+          input: listed.stdout,
+          encoding: 'utf-8',
+        })
+      : listed;
+  if (added.status !== 0)
+    throw new Error(`Failed to generate patch: git add -N failed: ${added.stderr || added.error}`);
+
   try {
-    const gitCheck = spawnSync('git rev-parse --is-inside-work-tree', {
-      cwd,
-      shell: true,
-      encoding: 'utf-8',
-    });
-    if (gitCheck.status !== 0 || gitCheck.stdout.trim() !== 'true') {
-      return null;
-    }
-
-    // Intent-to-add captures new source files. Dependency and runtime
-    // directories stay out of the patch so a merge cannot rewrite them.
-    spawnSync(
-      'git',
-      [
-        'add',
-        '-N',
-        '--',
-        '.',
-        ':(exclude).pi',
-        ':(exclude).swarm',
-        ':(exclude)BLACKBOARD.md',
-        ':(exclude)node_modules',
-      ],
-      {
-        cwd,
-        encoding: 'utf-8',
-        stdio: ['ignore', 'ignore', 'ignore'],
-      }
-    );
-
     const diffRes = spawnSync('git diff HEAD --binary', {
       cwd,
       shell: true,
