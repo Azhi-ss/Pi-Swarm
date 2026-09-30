@@ -1,7 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { execFile, spawn } from 'node:child_process';
-import { createServer } from 'node:net';
 import { promisify } from 'node:util';
 import { createRequire } from 'node:module';
 import { once } from 'node:events';
@@ -10,6 +9,7 @@ import { executeAction } from '../../router.js';
 import * as taskStore from '../../swarm/task-store.js';
 import { createWorktree, removeWorktree, type WorktreeInfo } from '../../swarm/worktree/index.js';
 import { createTestGitRepo } from '../helpers/git-fixtures.js';
+import { reservePort } from '../helpers/ports.js';
 import {
   createContext,
   createMessengerFixture,
@@ -315,11 +315,7 @@ describe('peer toolbox CLI integration', () => {
     );
     taskStore.stakeTask(repo.gitDir, sessionId, task.id, 'PeerB');
 
-    const listener = createServer();
-    listener.listen(0, '127.0.0.1');
-    await once(listener, 'listening');
-    const port = (listener.address() as { port: number }).port;
-    await new Promise<void>((resolve) => listener.close(() => resolve()));
+    const port = await reservePort();
     const env = {
       ...process.env,
       PI_SWARM_PROJECT_ROOT: '',

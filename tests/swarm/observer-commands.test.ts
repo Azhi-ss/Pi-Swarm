@@ -2,7 +2,6 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { execFile, spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { createServer } from 'node:net';
 import { createRequire } from 'node:module';
 import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
@@ -18,6 +17,7 @@ import {
   writeRegistration,
 } from '../helpers/messenger-fixtures.js';
 import { createTestGitRepo } from '../helpers/git-fixtures.js';
+import { reservePort } from '../helpers/ports.js';
 import { createWorktree, listActiveWorktrees } from '../../swarm/worktree/index.js';
 
 const sessionId = 'observer-session';
@@ -143,11 +143,7 @@ describe('observer commands', () => {
         },
       }) + '\n'
     );
-    const listener = createServer();
-    listener.listen(0, '127.0.0.1');
-    await once(listener, 'listening');
-    const port = (listener.address() as { port: number }).port;
-    await new Promise<void>((resolve) => listener.close(() => resolve()));
+    const port = await reservePort();
     const env = {
       ...process.env,
       PI_CODING_AGENT_DIR: path.join(buildDir, 'pi-agent'),

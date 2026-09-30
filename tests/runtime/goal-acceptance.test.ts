@@ -3,7 +3,7 @@
  * The acceptance command is a real process; local tests are not a scientific score.
  */
 import { execFile } from 'node:child_process';
-import { createServer } from 'node:net';
+import { reservePort } from '../helpers/ports.js';
 import { promisify } from 'node:util';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
@@ -89,10 +89,7 @@ async function prepare(project: string, files: Record<string, string> = {}) {
 }
 
 beforeAll(async () => {
-  const socket = createServer();
-  await new Promise<void>((resolve) => socket.listen(0, '127.0.0.1', resolve));
-  port = (socket.address() as { port: number }).port;
-  await new Promise<void>((resolve) => socket.close(() => resolve()));
+  port = await reservePort();
   env = {
     ...process.env,
     PI_SWARM_PROJECT_ROOT: '',
@@ -223,22 +220,26 @@ it('does not archive when acceptance evidence is missing or the check fails', as
     },
     { timeout: 10_000, interval: 200 }
   );
-  const checkedAt = JSON.parse(
-    (await invoke(project, ['run', 'show', started.id], as('Delegator'))).stdout
-  ).acceptance.checkedAt;
+  const firstCheck = Date.parse(
+    JSON.parse((await invoke(project, ['run', 'show', started.id], as('Delegator'))).stdout)
+      .acceptance.checkedAt
+  );
   await new Promise((resolve) => setTimeout(resolve, 1200));
   const repeated = JSON.parse((await invoke(project, ['run', 'status'], as('Delegator'))).stdout);
   expect(repeated).toMatchObject({ id: started.id, status: 'active', phase: 'Awaiting Handoff' });
-  expect(
+  // An unchanged snapshot is rechecked for external evidence at most every
+  // 2 s, not on every 500 ms tick. Under load, observation can lag past 2 s.
+  const lastCheck = Date.parse(
     JSON.parse((await invoke(project, ['run', 'show', started.id], as('Delegator'))).stdout)
       .acceptance.checkedAt
-  ).toBe(checkedAt);
-  expect(
-    fs
-      .readFileSync(path.join(project, '.pi', 'acceptance-runs'), 'utf8')
-      .trim()
-      .split('\n')
-  ).toEqual(['x']);
+  );
+  expect(lastCheck === firstCheck || lastCheck - firstCheck >= 2000).toBe(true);
+  const elapsed = Date.now() - firstCheck;
+  const runs = fs
+    .readFileSync(path.join(project, '.pi', 'acceptance-runs'), 'utf8')
+    .trim()
+    .split('\n');
+  expect(runs.length).toBeLessThanOrEqual(1 + Math.floor(elapsed / 2000));
   await expect(
     invoke(project, ['run', 'start', '--goal', 'Must not overlap a failed run'], as('Delegator'))
   ).rejects.toMatchObject({ stderr: expect.stringContaining('A Swarm Run is already active') });

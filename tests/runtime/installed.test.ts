@@ -1,12 +1,12 @@
 import { afterAll, beforeAll, expect, it, vi } from 'vitest';
 import { execFile, spawn } from 'node:child_process';
-import { createServer as createHttpServer } from 'node:http';
+import { createServer as createHttpServer, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
 import { promisify } from 'node:util';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { createServer } from 'node:net';
+import { reservePort } from '../helpers/ports.js';
 
 const exec = promisify(execFile);
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-installed-'));
@@ -18,6 +18,151 @@ let env: NodeJS.ProcessEnv;
 const run = (file: string, args: string[], cwd = project) =>
   exec(file, args, { cwd, env, timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
 const command = (...args: string[]) => run(cli, args);
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+type Delta = Record<string, unknown>;
+const say = (content: string): Delta => ({ content });
+const bash = (id: string, shell: string, timeout = 60): Delta => ({
+  tool_calls: [
+    {
+      index: 0,
+      id,
+      type: 'function',
+      function: { name: 'bash', arguments: JSON.stringify({ command: shell, timeout }) },
+    },
+  ],
+});
+function writeTurn(res: ServerResponse, deltas: Delta[]) {
+  res.writeHead(200, { 'content-type': 'text/event-stream' });
+  const finish = deltas.some((delta) => delta.tool_calls) ? 'tool_calls' : 'stop';
+  for (const choice of [
+    ...deltas.map((delta, i) => ({
+      delta: i ? delta : { role: 'assistant', ...delta },
+      finish_reason: null,
+    })),
+    { delta: {}, finish_reason: finish },
+  ])
+    res.write(
+      'data: ' +
+        JSON.stringify({
+          id: 'fixture',
+          object: 'chat.completion.chunk',
+          created: 1,
+          model: 'fixture',
+          choices: [{ index: 0, ...choice }],
+        }) +
+        '\n\n'
+    );
+  res.end('data: [DONE]\n\n');
+}
+function writeToolTurn(res: ServerResponse, id: string, shell: string) {
+  writeTurn(res, [bash(id, shell)]);
+}
+
+type Message = { role: string; content?: unknown };
+/** An incident arrived after the recipient's last reply that handled it. */
+function unanswered(messages: Message[], incident: string, reply: string) {
+  const text = (m: Message) => JSON.stringify(m.content ?? '');
+  let last = -1;
+  messages.forEach((m, i) => {
+    if (m.role === 'assistant' && text(m).includes(reply)) last = i;
+  });
+  return messages.slice(last + 1).some((m) => m.role !== 'assistant' && text(m).includes(incident));
+}
+
+const textOf = (m: Message) =>
+  typeof m.content === 'string'
+    ? m.content
+    : Array.isArray(m.content)
+      ? m.content.map((part: { text?: string }) => part.text ?? '').join('')
+      : '';
+
+/** Completed assistant messages a real Pi process emitted containing `marker`. */
+function replies(output: string, marker: string) {
+  return output.split('\n').filter((line) => {
+    try {
+      const event = JSON.parse(line);
+      return (
+        event.type === 'message_end' &&
+        event.message?.role === 'assistant' &&
+        JSON.stringify(event.message.content).includes(marker)
+      );
+    } catch {
+      return false;
+    }
+  }).length;
+}
+
+function startPi(cwd: string, piEnv: NodeJS.ProcessEnv) {
+  const proc = spawn(
+    path.join(install, 'node_modules/.bin/pi'),
+    [
+      '--mode',
+      'rpc',
+      '--no-session',
+      '--no-skills',
+      '--extension',
+      path.join(install, 'node_modules/pi-messenger-swarm/dist/index.js'),
+      '--provider',
+      'fixture',
+      '--model',
+      'fixture',
+    ],
+    { cwd, env: piEnv, stdio: 'pipe' }
+  );
+  const pi = {
+    pid: proc.pid!,
+    output: '',
+    exited: once(proc, 'exit'),
+    prompt: (message: string) =>
+      proc.stdin.write(JSON.stringify({ type: 'prompt', message }) + '\n'),
+    async stop() {
+      proc.kill('SIGTERM');
+      await pi.exited.catch(() => {});
+    },
+  };
+  proc.stdout.on('data', (c) => (pi.output += c));
+  proc.stderr.on('data', (c) => (pi.output += c));
+  return pi;
+}
+
+async function initRepo(dir: string) {
+  fs.mkdirSync(dir, { recursive: true });
+  await run('git', ['init'], dir);
+  await run('git', ['config', 'user.name', 'Test'], dir);
+  await run('git', ['config', 'user.email', 'test@example.test'], dir);
+  await run('git', ['commit', '--allow-empty', '-m', 'initial'], dir);
+}
+
+/** An independent installed service process on its own port and log. */
+async function secondService(cwd = project, extra: NodeJS.ProcessEnv = {}) {
+  const secondPort = await reservePort();
+  return (...args: string[]) =>
+    exec(process.execPath, [cli, ...args], {
+      cwd,
+      env: {
+        ...env,
+        ...extra,
+        PI_MESSENGER_PORT: String(secondPort),
+        PI_MESSENGER_LOG: path.join(root, `second-${secondPort}.log`),
+      },
+      timeout: 20_000,
+    });
+}
+
+/** PID of a spawned peer, from the public process table. */
+async function peerPid(cmd: (...args: string[]) => Promise<{ stdout: string }>, id: string) {
+  return Number(
+    (await cmd('ps')).stdout
+      .split('\n')
+      .find((line) => line.includes(`worker-${id}`))!
+      .split('|')[4]
+      .trim()
+  );
+}
+const spawnedId = (listing: string, name: string) =>
+  listing.match(new RegExp(`^- (\\w+): ${name} `, 'm'))?.[1];
+const historyCount = (history: string) => (history.match(/^- /gm) || []).length;
 async function coldRestart() {
   const previous = JSON.parse((await command('--status')).stdout).pid;
   process.kill(previous, 'SIGTERM');
@@ -36,11 +181,7 @@ async function coldRestart() {
 
 beforeAll(async () => {
   fs.mkdirSync(install);
-  fs.mkdirSync(project);
-  const socket = createServer();
-  await new Promise<void>((resolve) => socket.listen(0, '127.0.0.1', resolve));
-  port = (socket.address() as { port: number }).port;
-  await new Promise<void>((resolve) => socket.close(() => resolve()));
+  port = await reservePort();
   env = {
     ...process.env,
     HTTP_PROXY: '',
@@ -66,21 +207,7 @@ beforeAll(async () => {
     NODE_OPTIONS: '',
   };
   for (const key of Object.keys(env)) if (key.startsWith('GIT_')) delete env[key];
-  await run('git', ['init'], project);
-  await run(
-    'git',
-    [
-      '-c',
-      'user.email=test@example.test',
-      '-c',
-      'user.name=Test',
-      'commit',
-      '--allow-empty',
-      '-m',
-      'initial',
-    ],
-    project
-  );
+  await initRepo(project);
   await run('npm', ['run', 'build'], process.cwd());
   await run('npm', ['pack', '--json', '--pack-destination', root], process.cwd());
   const packed = { filename: fs.readdirSync(root).find((name) => name.endsWith('.tgz'))! };
@@ -190,27 +317,9 @@ it.each(['custom', 'global'])(
   'keeps same-name peers and their tasks separate in %s shared storage',
   async (storageMode) => {
     const targetProject = storageMode === 'custom' ? project : path.join(root, 'global-project');
-    if (targetProject !== project) {
-      fs.mkdirSync(targetProject);
-      await run('git', ['init'], targetProject);
-    }
+    if (targetProject !== project) await initRepo(targetProject);
     const other = path.join(root, storageMode === 'custom' ? 'other' : 'global-other');
-    fs.mkdirSync(other);
-    await run('git', ['init'], other);
-    await run(
-      'git',
-      [
-        '-c',
-        'user.email=test@example.test',
-        '-c',
-        'user.name=Test',
-        'commit',
-        '--allow-empty',
-        '-m',
-        'initial',
-      ],
-      other
-    );
+    await initRepo(other);
     const shared = path.join(root, 'shared');
     const scoped = (cwd: string, name: string, ...args: string[]) =>
       exec(process.execPath, [cli, ...args], {
@@ -291,7 +400,9 @@ it('actively delivers a verification failure to a real installed Pi host, while 
     let raw = '';
     for await (const chunk of req) raw += chunk;
     requests.push(raw);
-    if (rejectIncident && raw.includes('[Verification Failed]')) {
+    const messages: Message[] = JSON.parse(raw).messages;
+    const latest = JSON.stringify(messages.at(-1));
+    if (rejectIncident && latest.includes('[Verification Failed]')) {
       sawRejectedIncident = true;
       res.writeHead(400, { 'content-type': 'application/json' });
       res.end(
@@ -304,86 +415,19 @@ it('actively delivers a verification failure to a real installed Pi host, while 
       );
       return;
     }
-    const pauseForIncident =
-      raw.includes('pause for critical regression') && !raw.includes('[Verification Failed]');
-    const content = raw.includes('All-Dead Attribution Brief')
-      ? 'HANDLED_ALL_DEAD'
-      : raw.includes('[Verification Failed]')
-        ? 'HANDLED_VERIFICATION'
-        : 'READY';
-    res.writeHead(200, { 'content-type': 'text/event-stream' });
-    for (const choice of [
-      {
-        delta: pauseForIncident
-          ? {
-              role: 'assistant',
-              tool_calls: [
-                {
-                  index: 0,
-                  id: 'pause',
-                  type: 'function',
-                  function: {
-                    name: 'bash',
-                    arguments: JSON.stringify({ command: 'sleep 3', timeout: 10 }),
-                  },
-                },
-              ],
-            }
-          : { role: 'assistant', content },
-        finish_reason: null,
-      },
-      { delta: {}, finish_reason: pauseForIncident ? 'tool_calls' : 'stop' },
-    ]) {
-      res.write(
-        'data: ' +
-          JSON.stringify({
-            id: 'fixture',
-            object: 'chat.completion.chunk',
-            created: 1,
-            model: 'fixture',
-            choices: [{ index: 0, ...choice }],
-          }) +
-          '\n\n'
-      );
-    }
-    res.end('data: [DONE]\n\n');
+    // Each reply answers only incidents delivered after its previous handling.
+    if (latest.includes('pause for critical regression'))
+      return writeTurn(res, [bash('pause', 'sleep 3', 10)]);
+    if (unanswered(messages, 'All-Dead Attribution Brief', 'HANDLED_ALL_DEAD'))
+      return writeTurn(res, [say('HANDLED_ALL_DEAD')]);
+    if (unanswered(messages, '[Verification Failed]', 'HANDLED_VERIFICATION'))
+      return writeTurn(res, [say('HANDLED_VERIFICATION')]);
+    writeTurn(res, [say('READY')]);
   });
   provider.listen(0, '127.0.0.1');
   await once(provider, 'listening');
-  fs.mkdirSync(env.PI_CODING_AGENT_DIR!, { recursive: true });
-  fs.writeFileSync(
-    path.join(env.PI_CODING_AGENT_DIR!, 'models.json'),
-    JSON.stringify({
-      providers: {
-        fixture: {
-          baseUrl: `http://127.0.0.1:${(provider.address() as { port: number }).port}/v1`,
-          api: 'openai-completions',
-          apiKey: 'fixture',
-          models: [{ id: 'fixture', contextWindow: 128000, maxTokens: 1024 }],
-        },
-      },
-    })
-  );
-  const host = spawn(
-    path.join(install, 'node_modules/.bin/pi'),
-    [
-      '--mode',
-      'rpc',
-      '--no-session',
-      '--no-skills',
-      '--extension',
-      path.join(install, 'node_modules/pi-messenger-swarm/dist/index.js'),
-      '--provider',
-      'fixture',
-      '--model',
-      'fixture',
-    ],
-    { cwd: project, env: { ...env, PI_AGENT_NAME: 'Receiver' }, stdio: 'pipe' }
-  );
-  let output = '';
-  host.stdout.on('data', (c) => (output += c));
-  host.stderr.on('data', (c) => (output += c));
-  const exited = once(host, 'exit');
+  useFixture((provider.address() as { port: number }).port);
+  const host = startPi(project, { ...env, PI_AGENT_NAME: 'Receiver' });
   const peer = (...args: string[]) =>
     exec(process.execPath, [cli, ...args], {
       cwd: project,
@@ -391,10 +435,11 @@ it('actively delivers a verification failure to a real installed Pi host, while 
       timeout: 15_000,
     });
   try {
-    host.stdin.write(JSON.stringify({ type: 'prompt', message: 'ready' }) + '\n');
-    await vi.waitFor(() => expect(output.includes('READY'), output.slice(-2500)).toBe(true), {
-      timeout: 15_000,
-    });
+    host.prompt('ready');
+    await vi.waitFor(
+      () => expect(host.output.includes('READY'), host.output.slice(-2500)).toBe(true),
+      { timeout: 15_000 }
+    );
     await peer('run', 'join');
     const beforeRestart = JSON.parse((await command('run', 'status')).stdout);
     await coldRestart();
@@ -402,26 +447,26 @@ it('actively delivers a verification failure to a real installed Pi host, while 
       id: beforeRestart.id,
       consumedSteps: beforeRestart.consumedSteps,
     });
-    const calls = requests.length;
+    const turns = () => (host.output.match(/"type":"agent_start"/g) || []).length;
+    const idleTurns = turns();
     await command('send', 'Receiver', 'ordinary contract');
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    expect(requests).toHaveLength(calls);
+    await sleep(500);
+    expect(turns()).toBe(idleTurns);
     await peer('task', 'create', '--title', 'Verify critical delivery');
     await peer('task', 'claim', 'task-1');
-    const priorOutput = output.length;
-    host.stdin.write(
-      JSON.stringify({ type: 'prompt', message: 'pause for critical regression' }) + '\n'
+    const priorOutput = host.output.length;
+    host.prompt('pause for critical regression');
+    await vi.waitFor(
+      () => expect(host.output.slice(priorOutput)).toContain('tool_execution_start'),
+      { timeout: 10_000 }
     );
-    await vi.waitFor(() => expect(output.slice(priorOutput)).toContain('tool_execution_start'), {
-      timeout: 10_000,
-    });
     await expect(
       peer('task', 'done', 'task-1', 'test', '--verify', 'node -e "process.exit(7)"')
     ).rejects.toMatchObject({ code: 1 });
     await vi.waitFor(
       () => {
         expect(sawRejectedIncident).toBe(true);
-        expect(output.slice(priorOutput)).toContain('agent_end');
+        expect(host.output.slice(priorOutput)).toContain('agent_end');
       },
       { timeout: 10_000 }
     );
@@ -430,12 +475,11 @@ it('actively delivers a verification failure to a real installed Pi host, while 
         expect.objectContaining({ to: 'Receiver', taskId: 'task-1', status: 'enqueued' }),
       ])
     );
+    // The first arrival failed at the model; the incident arrives late on retry.
     rejectIncident = false;
-    host.stdin.write(
-      JSON.stringify({ type: 'prompt', message: 'retry the pending critical incident' }) + '\n'
-    );
+    host.prompt('retry the pending critical incident');
     await vi.waitFor(
-      () => expect(output.includes('HANDLED_VERIFICATION'), output.slice(-2500)).toBe(true),
+      () => expect(replies(host.output, 'HANDLED_VERIFICATION'), host.output.slice(-2500)).toBe(1),
       { timeout: 15_000 }
     );
     await vi.waitFor(
@@ -465,47 +509,37 @@ it('actively delivers a verification failure to a real installed Pi host, while 
           raw.includes('Incident: verif-task-1-1')
       )
     ).toBe(true);
-    const handledOnce = requests.length;
-    await new Promise((resolve) => setTimeout(resolve, 800));
-    expect(requests.length).toBe(handledOnce);
+    await sleep(800);
+    expect(replies(host.output, 'HANDLED_VERIFICATION')).toBe(1);
     expect(
       JSON.parse((await peer('notifications')).stdout).filter(
         (n: { id: string }) => n.id === 'verif-task-1-1'
       )
     ).toHaveLength(1);
-    const delegator = spawn(
-      path.join(install, 'node_modules/.bin/pi'),
-      [
-        '--mode',
-        'rpc',
-        '--no-session',
-        '--no-skills',
-        '--extension',
-        path.join(install, 'node_modules/pi-messenger-swarm/dist/index.js'),
-        '--provider',
-        'fixture',
-        '--model',
-        'fixture',
-      ],
-      { cwd: project, env, stdio: 'pipe' }
-    );
-    let handled = '';
-    delegator.stdout.on('data', (c) => (handled += c));
-    delegator.stderr.on('data', (c) => (handled += c));
-    const delegatorExit = once(delegator, 'exit');
+    const delegator = startPi(project, env);
     try {
-      delegator.stdin.write(JSON.stringify({ type: 'prompt', message: 'ready' }) + '\n');
-      await vi.waitFor(() => expect(handled.includes('READY'), handled.slice(-1000)).toBe(true), {
-        timeout: 15_000,
-      });
+      delegator.prompt('ready');
+      await vi.waitFor(
+        () => expect(delegator.output.includes('READY'), delegator.output.slice(-1000)).toBe(true),
+        { timeout: 15_000 }
+      );
       for (let attempt = 0; attempt < 2; attempt++)
         await expect(
           peer('task', 'done', 'task-1', 'test', '--verify', 'node -e "process.exit(7)"')
         ).rejects.toMatchObject({ code: 1 });
       await vi.waitFor(
-        () => expect(handled.includes('HANDLED_ALL_DEAD'), handled.slice(-1500)).toBe(true),
+        () =>
+          expect(replies(delegator.output, 'HANDLED_ALL_DEAD'), delegator.output.slice(-1500)).toBe(
+            1
+          ),
         { timeout: 15_000 }
       );
+      // Every recovery tick enqueues the same all-dead incident again; a
+      // service restart re-reads it. The wait outlasts the host watchdog's 5s
+      // poll, the other all-dead path. The Delegator still handles it once.
+      await coldRestart();
+      await sleep(5500);
+      expect(replies(delegator.output, 'HANDLED_ALL_DEAD'), delegator.output.slice(-1500)).toBe(1);
       expect(
         requests.some(
           (raw) =>
@@ -517,15 +551,13 @@ it('actively delivers a verification failure to a real installed Pi host, while 
       ).toBe(true);
       expect((await command('run', 'status')).stdout).toContain('Awaiting Handoff');
     } finally {
-      delegator.kill('SIGTERM');
-      await delegatorExit;
+      await delegator.stop();
     }
   } finally {
-    host.kill('SIGTERM');
-    await exited;
+    await host.stop();
     await new Promise<void>((resolve) => provider.close(() => resolve()));
   }
-}, 60_000);
+}, 75_000);
 
 it('suspends only the failing task after three actual replacement startup failures', async () => {
   await command('abort');
@@ -647,55 +679,11 @@ it('recovers tracked and new source files through a real successor, reverifies, 
       )
     )
       shell = undefined;
-    res.writeHead(200, { 'content-type': 'text/event-stream' });
-    const delta = shell
-      ? {
-          role: 'assistant',
-          tool_calls: [
-            {
-              index: 0,
-              id: `call_${requests}`,
-              type: 'function',
-              function: {
-                name: 'bash',
-                arguments: JSON.stringify({ command: shell, timeout: 20 }),
-              },
-            },
-          ],
-        }
-      : { role: 'assistant', content: 'Recovery finished' };
-    for (const choice of [
-      { delta, finish_reason: null },
-      { delta: {}, finish_reason: shell ? 'tool_calls' : 'stop' },
-    ])
-      res.write(
-        'data: ' +
-          JSON.stringify({
-            id: 'recovery',
-            object: 'chat.completion.chunk',
-            created: 1,
-            model: 'fixture',
-            choices: [{ index: 0, ...choice }],
-          }) +
-          '\n\n'
-      );
-    res.end('data: [DONE]\n\n');
+    writeTurn(res, [shell ? bash(`call_${requests}`, shell, 20) : say('Recovery finished')]);
   });
   provider.listen(0, '127.0.0.1');
   await once(provider, 'listening');
-  fs.writeFileSync(
-    path.join(env.PI_CODING_AGENT_DIR!, 'models.json'),
-    JSON.stringify({
-      providers: {
-        fixture: {
-          baseUrl: `http://127.0.0.1:${(provider.address() as { port: number }).port}/v1`,
-          api: 'openai-completions',
-          apiKey: 'fixture',
-          models: [{ id: 'fixture', contextWindow: 128000, maxTokens: 2048 }],
-        },
-      },
-    })
-  );
+  useFixture((provider.address() as { port: number }).port);
   try {
     await command(
       'spawn',
@@ -772,50 +760,11 @@ it('persists an exhausted budget and physically stops peers without creating rep
     for await (const _chunk of req) {
       /* Drain the model request. */
     }
-    res.writeHead(200, { 'content-type': 'text/event-stream' });
-    const delta = {
-      role: 'assistant',
-      tool_calls: [
-        {
-          index: 0,
-          id: `call_${Date.now()}`,
-          type: 'function',
-          function: { name: 'bash', arguments: JSON.stringify({ command: 'true', timeout: 5 }) },
-        },
-      ],
-    };
-    for (const choice of [
-      { delta, finish_reason: null },
-      { delta: {}, finish_reason: 'tool_calls' },
-    ])
-      res.write(
-        'data: ' +
-          JSON.stringify({
-            id: 'budget',
-            object: 'chat.completion.chunk',
-            created: 1,
-            model: 'fixture',
-            choices: [{ index: 0, ...choice }],
-          }) +
-          '\n\n'
-      );
-    res.end('data: [DONE]\n\n');
+    writeTurn(res, [bash(`call_${Date.now()}`, 'true', 5)]);
   });
   provider.listen(0, '127.0.0.1');
   await once(provider, 'listening');
-  fs.writeFileSync(
-    path.join(env.PI_CODING_AGENT_DIR!, 'models.json'),
-    JSON.stringify({
-      providers: {
-        fixture: {
-          baseUrl: `http://127.0.0.1:${(provider.address() as { port: number }).port}/v1`,
-          api: 'openai-completions',
-          apiKey: 'fixture',
-          models: [{ id: 'fixture', contextWindow: 128000, maxTokens: 2048 }],
-        },
-      },
-    })
-  );
+  useFixture((provider.address() as { port: number }).port);
   try {
     await command('spawn', '--task-id', 'task-1', '--model', 'fixture/fixture', 'Consume steps');
     await vi.waitFor(
@@ -889,20 +838,7 @@ it('accepts a verified solution alongside a pruned hypothesis without blocking a
 }, 30_000);
 
 it('shares spawn admission between two installed service processes', async () => {
-  const socket = createServer();
-  await new Promise<void>((resolve) => socket.listen(0, '127.0.0.1', resolve));
-  const secondPort = (socket.address() as { port: number }).port;
-  await new Promise<void>((resolve) => socket.close(() => resolve()));
-  const second = (...args: string[]) =>
-    exec(process.execPath, [cli, ...args], {
-      cwd: project,
-      env: {
-        ...env,
-        PI_MESSENGER_PORT: String(secondPort),
-        PI_MESSENGER_LOG: path.join(root, 'second.log'),
-      },
-      timeout: 20_000,
-    });
+  const second = await secondService();
   // Hold model requests so accepted peers remain alive during both admissions.
   const provider = createHttpServer(async (req, _res) => {
     for await (const _chunk of req) {
@@ -910,23 +846,13 @@ it('shares spawn admission between two installed service processes', async () =>
   });
   provider.listen(0, '127.0.0.1');
   await once(provider, 'listening');
-  fs.writeFileSync(
-    path.join(env.PI_CODING_AGENT_DIR!, 'models.json'),
-    JSON.stringify({
-      providers: {
-        fixture: {
-          baseUrl: `http://127.0.0.1:${(provider.address() as { port: number }).port}/v1`,
-          api: 'openai-completions',
-          apiKey: 'fixture',
-          models: [{ id: 'fixture', contextWindow: 128000, maxTokens: 1024 }],
-        },
-      },
-    })
-  );
+  useFixture((provider.address() as { port: number }).port);
   await second('--start');
   try {
     await command('run', 'start', '--goal', 'Cross-process admission', '--concurrency', '1');
-    await Promise.all([command('run', 'join'), second('run', 'join')]);
+    // Two live callers cannot register one agent name at the same moment.
+    await command('run', 'join');
+    await second('run', 'join');
     const admissions = await Promise.allSettled([
       command('spawn', '--model', 'fixture/fixture', 'Hold first worker'),
       second('spawn', '--model', 'fixture/fixture', 'Hold second worker'),
@@ -937,10 +863,7 @@ it('shares spawn admission between two installed service processes', async () =>
     ).toContain('concurrency');
 
     await command('abort');
-    const recoveryRun = JSON.parse(
-      (await command('run', 'start', '--goal', 'Bound duplicate recovery', '--concurrency', '3'))
-        .stdout
-    );
+    await command('run', 'start', '--goal', 'Bound duplicate recovery', '--concurrency', '3');
     await command('run', 'join');
     await command('task', 'create', '--title', 'First recovery');
     await command('task', 'create', '--title', 'Second recovery');
@@ -960,31 +883,29 @@ it('shares spawn admission between two installed service processes', async () =>
       'fixture/fixture',
       'Wait for second recovery'
     );
-    const eventsFile = path.join(project, '.pi/messenger/agents', `${recoveryRun.id}.jsonl`);
-    const events = () =>
-      fs
-        .readFileSync(eventsFile, 'utf8')
-        .trim()
-        .split('\n')
-        .map((line) => JSON.parse(line));
-    const originalPids = events()
-      .filter((event) => event.agent.pid)
-      .map((event) => event.agent.pid);
-    expect(originalPids).toHaveLength(2);
+    const ids = [...(await command('spawn', 'list')).stdout.matchAll(/^- (\w+): /gm)].map(
+      (m) => m[1]
+    );
+    expect(ids).toHaveLength(2);
+    // Each service's process table lists the peer it started.
+    const originalPids = await Promise.all(
+      ids.map((id) => peerPid(command, id).catch(() => peerPid(second, id)))
+    );
     fs.writeFileSync(
       path.join(project, '.pi/pi-messenger.json'),
       JSON.stringify({ maxConcurrentSpawns: 1 })
     );
     for (const pid of originalPids) process.kill(pid, 'SIGKILL');
-    await vi.waitFor(
-      () => expect(events().filter((event) => event.type === 'spawned')).toHaveLength(3),
-      { timeout: 12_000 }
-    );
-    await new Promise((resolve) => setTimeout(resolve, 1200));
-    expect(events().filter((event) => event.type === 'spawned')).toHaveLength(3);
+    const spawned = async () => historyCount((await command('spawn', 'history')).stdout);
+    await vi.waitFor(async () => expect(await spawned()).toBe(3), { timeout: 12_000 });
+    await sleep(1200);
+    expect(await spawned()).toBe(3);
     const handoffs = JSON.parse((await command('run', 'status')).stdout).handoffs;
     expect(Object.values(handoffs).filter((h: any) => h.successor)).toHaveLength(1);
-    expect(Object.values(handoffs).every((h: any) => h.failures === 0)).toBe(true);
+    expect(
+      Object.values(handoffs).every((h: any) => h.failures === 0),
+      JSON.stringify(handoffs)
+    ).toBe(true);
   } finally {
     await command('abort').catch(() => {});
     await second('--stop').catch(() => {});
@@ -1071,81 +992,22 @@ it('delivers a merge conflict to the live peer and still rebases onto the evolve
   fs.writeFileSync(path.join(project, 'shared.txt'), 'base\n');
   await run('git', ['add', 'shared.txt']);
   await run('git', ['commit', '-m', 'shared base']);
-  const requests: string[] = [];
+  let calls = 0;
   const provider = createHttpServer(async (req, res) => {
     let raw = '';
     for await (const chunk of req) raw += chunk;
-    requests.push(raw);
-    const conflict = raw.includes('Incident: conflict-task-1-1');
-    res.writeHead(200, { 'content-type': 'text/event-stream' });
-    const deltas = conflict
-      ? [
-          { role: 'assistant', content: 'HANDLED_CONFLICT' },
-          {
-            tool_calls: [
-              {
-                index: 0,
-                id: `call_${requests.length}`,
-                type: 'function',
-                function: {
-                  name: 'bash',
-                  arguments: JSON.stringify({ command: 'sleep 25', timeout: 40 }),
-                },
-              },
-            ],
-          },
-        ]
-      : [
-          {
-            role: 'assistant',
-            tool_calls: [
-              {
-                index: 0,
-                id: `call_${requests.length}`,
-                type: 'function',
-                function: {
-                  name: 'bash',
-                  arguments: JSON.stringify({
-                    command: 'pi-messenger-swarm run join && echo READY && sleep 12',
-                    timeout: 30,
-                  }),
-                },
-              },
-            ],
-          },
-        ];
-    for (const choice of [
-      ...deltas.map((delta) => ({ delta, finish_reason: null })),
-      { delta: {}, finish_reason: 'tool_calls' as const },
-    ])
-      res.write(
-        'data: ' +
-          JSON.stringify({
-            id: 'conflict',
-            object: 'chat.completion.chunk',
-            created: 1,
-            model: 'fixture',
-            choices: [{ index: 0, ...choice }],
-          }) +
-          '\n\n'
-      );
-    res.end('data: [DONE]\n\n');
+    const messages: Message[] = JSON.parse(raw).messages;
+    // The incident arrives while the READY tool is still running.
+    writeTurn(
+      res,
+      unanswered(messages, 'Incident: conflict-task-1-1', 'HANDLED_CONFLICT')
+        ? [say('HANDLED_CONFLICT'), bash(`call_${++calls}`, 'sleep 25', 40)]
+        : [bash(`call_${++calls}`, 'pi-messenger-swarm run join && echo READY && sleep 12', 30)]
+    );
   });
   provider.listen(0, '127.0.0.1');
   await once(provider, 'listening');
-  fs.writeFileSync(
-    path.join(env.PI_CODING_AGENT_DIR!, 'models.json'),
-    JSON.stringify({
-      providers: {
-        fixture: {
-          baseUrl: `http://127.0.0.1:${(provider.address() as { port: number }).port}/v1`,
-          api: 'openai-completions',
-          apiKey: 'fixture',
-          models: [{ id: 'fixture', contextWindow: 128000, maxTokens: 2048 }],
-        },
-      },
-    })
-  );
+  useFixture((provider.address() as { port: number }).port);
   const started = JSON.parse(
     (await command('run', 'start', '--goal', 'Deliver the merge conflict', '--max-steps', '20'))
       .stdout
@@ -1201,10 +1063,9 @@ it('delivers a merge conflict to the live peer and still rebases onto the evolve
     expect(collided.stderr).toContain(
       'Main branch evolved with conflicts. Rebase your sandbox onto latest HEAD and re-verify!'
     );
-    await vi.waitFor(
-      async () => expect((await command('ps', 'logs', id!)).stdout).toContain('HANDLED_CONFLICT'),
-      { timeout: 30_000 }
-    );
+    const handled = async () =>
+      replies((await command('ps', 'logs', id!)).stdout, 'HANDLED_CONFLICT');
+    await vi.waitFor(async () => expect(await handled()).toBe(1), { timeout: 30_000 });
     const notes = JSON.parse((await merger('notifications')).stdout);
     expect(notes).toEqual(
       expect.arrayContaining([
@@ -1218,10 +1079,8 @@ it('delivers a merge conflict to the live peer and still rebases onto the evolve
         }),
       ])
     );
-    const seen = requests.filter((raw) => raw.includes('Incident: conflict-task-1-1')).length;
-    expect(seen).toBe(1);
-    await new Promise((resolve) => setTimeout(resolve, 700));
-    expect(requests.filter((raw) => raw.includes('Incident: conflict-task-1-1')).length).toBe(1);
+    await sleep(700);
+    expect(await handled()).toBe(1);
     const head = (await run('git', ['rev-parse', 'HEAD'])).stdout.trim();
     await run('git', ['reset', '--soft', head], sandbox);
     await merger('task', 'done', 'task-1', 'rebased', '--verify', 'node -e "process.exit(0)"');
@@ -1248,23 +1107,7 @@ it('does not deliver a critical incident to the same peer name in another projec
     exec(process.execPath, [cli, ...args], { cwd: side, env: sideEnv, timeout: 20_000 });
   const homeCmd = (...args: string[]) =>
     exec(process.execPath, [cli, ...args], { cwd: alpha, env: alphaEnv, timeout: 20_000 });
-  for (const dir of [alpha, side]) {
-    await run('git', ['init'], dir);
-    await run(
-      'git',
-      [
-        '-c',
-        'user.email=test@example.test',
-        '-c',
-        'user.name=Test',
-        'commit',
-        '--allow-empty',
-        '-m',
-        'init',
-      ],
-      dir
-    );
-  }
+  for (const dir of [alpha, side]) await initRepo(dir);
   const first = JSON.parse(
     (await homeCmd('run', 'start', '--goal', 'Isolate critical delivery')).stdout
   );
@@ -1279,68 +1122,22 @@ it('does not deliver a critical incident to the same peer name in another projec
     let raw = '';
     for await (const chunk of req) raw += chunk;
     requests.push(raw);
-    res.writeHead(200, { 'content-type': 'text/event-stream' });
-    for (const choice of [
-      { delta: { role: 'assistant', content: 'READY' }, finish_reason: null },
-      { delta: {}, finish_reason: 'stop' },
-    ])
-      res.write(
-        'data: ' +
-          JSON.stringify({
-            id: 'isolate',
-            object: 'chat.completion.chunk',
-            created: 1,
-            model: 'fixture',
-            choices: [{ index: 0, ...choice }],
-          }) +
-          '\n\n'
-      );
-    res.end('data: [DONE]\n\n');
+    writeTurn(res, [say('READY')]);
   });
   provider.listen(0, '127.0.0.1');
   await once(provider, 'listening');
-  fs.writeFileSync(
-    path.join(env.PI_CODING_AGENT_DIR!, 'models.json'),
-    JSON.stringify({
-      providers: {
-        fixture: {
-          baseUrl: `http://127.0.0.1:${(provider.address() as { port: number }).port}/v1`,
-          api: 'openai-completions',
-          apiKey: 'fixture',
-          models: [{ id: 'fixture', contextWindow: 128000, maxTokens: 1024 }],
-        },
-      },
-    })
-  );
-  const other = spawn(
-    path.join(install, 'node_modules/.bin/pi'),
-    [
-      '--mode',
-      'rpc',
-      '--no-session',
-      '--no-skills',
-      '--extension',
-      path.join(install, 'node_modules/pi-messenger-swarm/dist/index.js'),
-      '--provider',
-      'fixture',
-      '--model',
-      'fixture',
-    ],
-    { cwd: side, env: { ...sideEnv, PI_AGENT_NAME: 'Twin' }, stdio: 'pipe' }
-  );
-  let output = '';
-  other.stdout.on('data', (c) => (output += c));
-  other.stderr.on('data', (c) => (output += c));
-  const exited = once(other, 'exit');
+  useFixture((provider.address() as { port: number }).port);
+  const other = startPi(side, { ...sideEnv, PI_AGENT_NAME: 'Twin' });
   try {
     await sideCmd('run', 'start', '--goal', 'Other project');
     await sideCmd('run', 'join');
-    other.stdin.write(JSON.stringify({ type: 'prompt', message: 'ready' }) + '\n');
-    await vi.waitFor(() => expect(output.includes('READY'), output.slice(-1500)).toBe(true), {
-      timeout: 15_000,
-    });
-    await new Promise((resolve) => setTimeout(resolve, 800));
-    expect(output).not.toContain('Incident: verif-task-1-1');
+    other.prompt('ready');
+    await vi.waitFor(
+      () => expect(other.output.includes('READY'), other.output.slice(-1500)).toBe(true),
+      { timeout: 15_000 }
+    );
+    await sleep(800);
+    expect(other.output).not.toContain('Incident: verif-task-1-1');
     expect(requests.some((raw) => raw.includes('Incident: verif-task-1-1'))).toBe(false);
     expect(JSON.parse((await sideCmd('notifications')).stdout)).toEqual([]);
     expect(JSON.parse((await homeCmd('notifications', '--run', first.id)).stdout)).toEqual([
@@ -1351,93 +1148,37 @@ it('does not deliver a critical incident to the same peer name in another projec
         status: 'pending',
       }),
     ]);
-    other.kill('SIGTERM');
-    await exited;
+    await other.stop();
     await homeCmd('abort');
     const later = JSON.parse(
       (await homeCmd('run', 'start', '--goal', 'Later run same peer')).stdout
     );
     await homeCmd('run', 'join');
-    const again = spawn(
-      path.join(install, 'node_modules/.bin/pi'),
-      [
-        '--mode',
-        'rpc',
-        '--no-session',
-        '--no-skills',
-        '--extension',
-        path.join(install, 'node_modules/pi-messenger-swarm/dist/index.js'),
-        '--provider',
-        'fixture',
-        '--model',
-        'fixture',
-      ],
-      {
-        cwd: alpha,
-        env: alphaEnv,
-        stdio: 'pipe',
-      }
-    );
-    let laterOut = '';
-    again.stdout.on('data', (c) => (laterOut += c));
-    again.stderr.on('data', (c) => (laterOut += c));
-    const againExit = once(again, 'exit');
+    const again = startPi(alpha, alphaEnv);
     try {
-      again.stdin.write(JSON.stringify({ type: 'prompt', message: 'ready later' }) + '\n');
-      await vi.waitFor(() => expect(laterOut.includes('READY'), laterOut.slice(-1500)).toBe(true), {
-        timeout: 15_000,
-      });
-      await new Promise((resolve) => setTimeout(resolve, 800));
-      expect(laterOut).not.toContain('Incident: verif-task-1-1');
+      again.prompt('ready later');
+      await vi.waitFor(
+        () => expect(again.output.includes('READY'), again.output.slice(-1500)).toBe(true),
+        { timeout: 15_000 }
+      );
+      await sleep(800);
+      expect(again.output).not.toContain('Incident: verif-task-1-1');
       expect(JSON.parse((await homeCmd('notifications')).stdout)).toEqual([]);
       expect(JSON.parse((await homeCmd('notifications', '--run', first.id)).stdout)[0].status).toBe(
         'pending'
       );
       expect(later.id).not.toBe(first.id);
     } finally {
-      again.kill('SIGTERM');
-      await againExit;
+      await again.stop();
     }
   } finally {
-    other.kill('SIGTERM');
-    await exited.catch(() => {});
+    await other.stop();
     await homeCmd('abort').catch(() => {});
     await sideCmd('abort').catch(() => {});
     provider.closeAllConnections();
     await new Promise<void>((resolve) => provider.close(() => resolve()));
   }
 }, 60_000);
-
-function writeToolTurn(res: import('node:http').ServerResponse, id: string, shell: string) {
-  res.writeHead(200, { 'content-type': 'text/event-stream' });
-  const delta = {
-    role: 'assistant',
-    tool_calls: [
-      {
-        index: 0,
-        id,
-        type: 'function',
-        function: { name: 'bash', arguments: JSON.stringify({ command: shell, timeout: 60 }) },
-      },
-    ],
-  };
-  for (const choice of [
-    { delta, finish_reason: null },
-    { delta: {}, finish_reason: 'tool_calls' as const },
-  ])
-    res.write(
-      'data: ' +
-        JSON.stringify({
-          id: 'candidate',
-          object: 'chat.completion.chunk',
-          created: 1,
-          model: 'fixture',
-          choices: [{ index: 0, ...choice }],
-        }) +
-        '\n\n'
-    );
-  res.end('data: [DONE]\n\n');
-}
 
 function useFixture(port: number) {
   fs.mkdirSync(env.PI_CODING_AGENT_DIR!, { recursive: true });
@@ -1485,22 +1226,7 @@ it('preserves an unverified candidate and lets an explicit successor restore and
   await command('task', 'create', '--title', 'Unfinished source');
   await command('task', 'claim', 'task-1');
   const beta = path.join(root, 'beta-candidate');
-  fs.mkdirSync(beta);
-  await run('git', ['init'], beta);
-  await run(
-    'git',
-    [
-      '-c',
-      'user.email=test@example.test',
-      '-c',
-      'user.name=Test',
-      'commit',
-      '--allow-empty',
-      '-m',
-      'init',
-    ],
-    beta
-  );
+  await initRepo(beta);
   const betaCmd = (...args: string[]) =>
     exec(process.execPath, [cli, ...args], { cwd: beta, env, timeout: 20_000 });
   const successor = (...args: string[]) =>
@@ -1552,6 +1278,10 @@ it('preserves an unverified candidate and lets an explicit successor restore and
     );
     expect((await command('task', 'show', 'task-1')).stdout).toContain('Verification attempts: 0');
     expect(JSON.parse((await betaCmd('candidate', 'list')).stdout)).toEqual([]);
+    const candidateId = JSON.parse((await command('candidate', 'list')).stdout)[0].id;
+    const outOfScope = { code: 1, stderr: expect.stringContaining('not found in this run') };
+    await expect(betaCmd('candidate', 'show', candidateId)).rejects.toMatchObject(outOfScope);
+    await expect(betaCmd('candidate', 'restore', candidateId)).rejects.toMatchObject(outOfScope);
 
     await command(
       'spawn',
@@ -1610,6 +1340,8 @@ it('preserves an unverified candidate and lets an explicit successor restore and
     expect(later.id).not.toBe(started.id);
     expect(JSON.parse((await command('candidate', 'list')).stdout)).toEqual([]);
     await expect(command('candidate', 'show', 'latest')).rejects.toMatchObject({ code: 1 });
+    await expect(command('candidate', 'show', candidateId)).rejects.toMatchObject(outOfScope);
+    await expect(command('candidate', 'restore', candidateId)).rejects.toMatchObject(outOfScope);
     await command('abort');
     await betaCmd('abort');
   } finally {
@@ -1620,13 +1352,17 @@ it('preserves an unverified candidate and lets an explicit successor restore and
   }
 }, 70_000);
 
-it('keeps the sandbox when preservation fails and does not save a candidate on abort', async () => {
+it('keeps the sandbox when preservation fails, still hands off another task, and saves no candidate on abort', async () => {
   await command('abort').catch(() => {});
   fs.mkdirSync(path.join(project, 'node_modules'), { recursive: true });
   fs.writeFileSync(path.join(project, 'node_modules', 'keep.txt'), 'host dependency\n');
   const provider = createHttpServer(async (req, res) => {
     let raw = '';
     for await (const chunk of req) raw += chunk;
+    if (raw.includes('Automatic Handoff for task-2'))
+      return writeToolTurn(res, 'successor', 'echo SUCCESSOR_READY && sleep 30');
+    if (raw.includes('exit for a successor'))
+      return writeToolTurn(res, 'leave', 'sleep 1 && kill -KILL "$PI_SWARM_PEER_PID"');
     const shell = raw.includes('do not preserve on abort')
       ? "printf 'abort me\\n' > abort-note.txt && echo READY && sleep 30"
       : 'pi-messenger-swarm run join && echo READY && sleep 30';
@@ -1637,10 +1373,22 @@ it('keeps the sandbox when preservation fails and does not save a candidate on a
   useFixture((provider.address() as { port: number }).port);
   try {
     const broken = JSON.parse(
-      (await command('run', 'start', '--goal', 'Fail preservation', '--max-steps', '10')).stdout
+      (
+        await command(
+          'run',
+          'start',
+          '--goal',
+          'Fail preservation',
+          '--max-steps',
+          '20',
+          '--concurrency',
+          '3'
+        )
+      ).stdout
     );
     await command('run', 'join');
     await command('task', 'create', '--title', 'Broken sandbox');
+    await command('task', 'create', '--title', 'Handed off despite the broken sandbox');
     await command('task', 'claim', 'task-1');
     await command(
       'spawn',
@@ -1660,14 +1408,7 @@ it('keeps the sandbox when preservation fails and does not save a candidate on a
       { timeout: 15_000 }
     );
     fs.rmSync(path.join(sandbox, '.git'), { force: true });
-    const pid = Number(
-      (await command('ps')).stdout
-        .split('\n')
-        .find((line) => line.includes(`worker-${brokenId}`))!
-        .split('|')[4]
-        .trim()
-    );
-    process.kill(pid, 'SIGKILL');
+    process.kill(await peerPid(command, brokenId!), 'SIGKILL');
     await vi.waitFor(
       async () =>
         expect((await command('spawn', 'history')).stdout).toContain(
@@ -1675,7 +1416,32 @@ it('keeps the sandbox when preservation fails and does not save a candidate on a
         ),
       { timeout: 10_000 }
     );
+    // Every later tick retries the broken Sandbox; another task still moves.
+    await command(
+      'spawn',
+      '--task-id',
+      'task-2',
+      '--name',
+      'Leaver',
+      '--model',
+      'fixture/fixture',
+      'exit for a successor'
+    );
+    await vi.waitFor(
+      async () => {
+        const handoffs = JSON.parse((await command('run', 'status')).stdout).handoffs;
+        expect(handoffs['task-2']?.successor).toBeTruthy();
+        expect((await command('ps', 'logs', handoffs['task-2'].successor)).stdout).toContain(
+          'SUCCESSOR_READY'
+        );
+      },
+      { timeout: 20_000 }
+    );
     expect(fs.existsSync(sandbox)).toBe(true);
+    expect(JSON.parse((await command('run', 'status')).stdout).handoffs['task-1']).toBeUndefined();
+    expect((await command('spawn', 'history')).stdout).toMatch(
+      new RegExp(`${brokenId}: Broken .*Candidate preservation failed; Sandbox retained`)
+    );
     expect(JSON.parse((await command('candidate', 'list')).stdout)).toEqual([]);
     expect((await command('task', 'show', 'task-1')).stdout).toContain('Status: in_progress');
     await command('abort');
@@ -1703,6 +1469,7 @@ it('keeps the sandbox when preservation fails and does not save a candidate on a
       { timeout: 15_000 }
     );
     await command('abort');
+    // candidate list only reads the active run; an aborted run has no public entry.
     const saved = path.join(project, '.pi', 'messenger', 'candidates', aborted.id);
     expect(
       fs.existsSync(saved) ? fs.readdirSync(saved).filter((name) => name.endsWith('.json')) : []
@@ -1787,68 +1554,21 @@ it('suspends automatic handoff after three startup failures and resumes only whe
     let raw = '';
     for await (const chunk of req) raw += chunk;
     requests.push(raw);
-    const suspended = raw.includes('Automatic Handoff suspended');
-    res.writeHead(200, { 'content-type': 'text/event-stream' });
-    for (const choice of [
-      {
-        delta: { role: 'assistant', content: suspended ? 'HANDLED_SUSPENSION' : 'READY' },
-        finish_reason: null,
-      },
-      { delta: {}, finish_reason: 'stop' as const },
-    ])
-      res.write(
-        'data: ' +
-          JSON.stringify({
-            id: 'suspend',
-            object: 'chat.completion.chunk',
-            created: 1,
-            model: 'fixture',
-            choices: [{ index: 0, ...choice }],
-          }) +
-          '\n\n'
-      );
-    res.end('data: [DONE]\n\n');
+    const messages: Message[] = JSON.parse(raw).messages;
+    writeTurn(res, [
+      say(
+        unanswered(messages, 'Automatic Handoff suspended', 'HANDLED_SUSPENSION')
+          ? 'HANDLED_SUSPENSION'
+          : 'READY'
+      ),
+    ]);
   });
   provider.listen(0, '127.0.0.1');
   await once(provider, 'listening');
   useFixture((provider.address() as { port: number }).port);
-  const delegator = spawn(
-    path.join(install, 'node_modules/.bin/pi'),
-    [
-      '--mode',
-      'rpc',
-      '--no-session',
-      '--no-skills',
-      '--extension',
-      path.join(install, 'node_modules/pi-messenger-swarm/dist/index.js'),
-      '--provider',
-      'fixture',
-      '--model',
-      'fixture',
-    ],
-    { cwd: project, env, stdio: 'pipe' }
-  );
-  let output = '';
-  delegator.stdout.on('data', (c) => (output += c));
-  delegator.stderr.on('data', (c) => (output += c));
-  const exited = once(delegator, 'exit');
+  const delegator = startPi(project, env);
   const other = path.join(root, 'handoff-other');
-  fs.mkdirSync(other, { recursive: true });
-  await run('git', ['init'], other);
-  await run(
-    'git',
-    [
-      '-c',
-      'user.email=test@example.test',
-      '-c',
-      'user.name=Test',
-      'commit',
-      '--allow-empty',
-      '-m',
-      'init',
-    ],
-    other
-  );
+  await initRepo(other);
   const otherCmd = (...args: string[]) =>
     exec(process.execPath, [cli, ...args], {
       cwd: other,
@@ -1862,10 +1582,11 @@ it('suspends automatic handoff after three startup failures and resumes only whe
       timeout: 20_000,
     });
   try {
-    delegator.stdin.write(JSON.stringify({ type: 'prompt', message: 'ready' }) + '\n');
-    await vi.waitFor(() => expect(output.includes('READY'), output.slice(-1500)).toBe(true), {
-      timeout: 15_000,
-    });
+    delegator.prompt('ready');
+    await vi.waitFor(
+      () => expect(delegator.output.includes('READY'), delegator.output.slice(-1500)).toBe(true),
+      { timeout: 15_000 }
+    );
     await asDelegator('run', 'start', '--goal', 'Suspend then resume', '--max-steps', '100000');
     await asDelegator('run', 'join');
     await asDelegator('task', 'create', '--title', 'Cannot take over');
@@ -1886,8 +1607,12 @@ it('suspends automatic handoff after three startup failures and resumes only whe
       },
       { timeout: 35_000, interval: 500 }
     );
+    // Each tick re-enqueues the suspension; the Delegator handles it once.
     await vi.waitFor(
-      () => expect(output.includes('HANDLED_SUSPENSION'), output.slice(-2000)).toBe(true),
+      () =>
+        expect(replies(delegator.output, 'HANDLED_SUSPENSION'), delegator.output.slice(-2000)).toBe(
+          1
+        ),
       { timeout: 15_000 }
     );
     expect(
@@ -1904,8 +1629,9 @@ it('suspends automatic handoff after three startup failures and resumes only whe
       ])
     );
     const history = (await asDelegator('spawn', 'history')).stdout;
-    await new Promise((resolve) => setTimeout(resolve, 1200));
+    await sleep(1200);
     expect((await asDelegator('spawn', 'history')).stdout).toBe(history);
+    expect(replies(delegator.output, 'HANDLED_SUSPENSION')).toBe(1);
     expect((await asDelegator('task', 'show', 'task-1')).stdout).toContain(
       'Verification attempts: 0'
     );
@@ -1933,21 +1659,17 @@ it('suspends automatic handoff after three startup failures and resumes only whe
     );
     expect((await asDelegator('task', 'show', 'task-1')).stdout).not.toContain('dead_end');
     const active = JSON.parse((await asDelegator('run', 'status')).stdout);
-    const spawnLog = path.join(project, '.pi', 'messenger', 'agents', `${active.id}.jsonl`);
-    const spawnedIds = (text: string) =>
-      text
-        .split('\n')
-        .filter((line) => line.includes('"type":"spawned"'))
-        .map((line) => JSON.parse(line).id);
-    const beforeAbort = spawnedIds(fs.readFileSync(spawnLog, 'utf8'));
     await asDelegator('abort');
-    expect(JSON.parse((await asDelegator('run', 'show', active.id)).stdout).status).toBe('aborted');
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-    expect(spawnedIds(fs.readFileSync(spawnLog, 'utf8'))).toEqual(beforeAbort);
+    // Every automatic spawn records its successor and start time in the run.
+    const aborted = JSON.parse((await asDelegator('run', 'show', active.id)).stdout);
+    expect(aborted.status).toBe('aborted');
+    await sleep(1500);
+    expect(JSON.parse((await asDelegator('run', 'show', active.id)).stdout).handoffs).toEqual(
+      aborted.handoffs
+    );
     await otherCmd('abort');
   } finally {
-    delegator.kill('SIGTERM');
-    await exited.catch(() => {});
+    await delegator.stop();
     await command('abort').catch(() => {});
     await otherCmd('abort').catch(() => {});
     provider.closeAllConnections();
@@ -1955,7 +1677,7 @@ it('suspends automatic handoff after three startup failures and resumes only whe
   }
 }, 70_000);
 
-it('does not replace a task that a live peer still holds', async () => {
+it('does not replace a task that a live peer still holds, and never merges a patch missing new files', async () => {
   await command('abort').catch(() => {});
   const provider = createHttpServer(async (req, res) => {
     let raw = '';
@@ -2014,13 +1736,555 @@ it('does not replace a task that a live peer still holds', async () => {
     await new Promise((resolve) => setTimeout(resolve, 1500));
     expect((await command('task', 'show', 'task-1')).stdout).toContain('Claimed by: Holder');
     expect((await command('spawn', 'list')).stdout).toContain('Holder');
-    expect((await command('spawn', 'list')).stdout).not.toContain('Successor');
     const names = (await command('spawn', 'history')).stdout;
     expect(names).toContain('Holder');
-    expect((names.match(/^- /gm) || []).length).toBe((before.match(/^- /gm) || []).length + 1);
+    expect(historyCount(names)).toBe(historyCount(before) + 1);
+
+    // A failed intent-to-add must not verify and merge a patch lacking the new file.
+    const sandbox = path.join(project, '.swarm', 'workspaces', `worker-${holderId}`);
+    fs.writeFileSync(path.join(sandbox, 'held-new.ts'), 'export const held = true;\n');
+    const gitDir = (await run('git', ['rev-parse', '--absolute-git-dir'], sandbox)).stdout.trim();
+    fs.writeFileSync(path.join(gitDir, 'index.lock'), '');
+    const holder = (...args: string[]) =>
+      exec(process.execPath, [cli, ...args], {
+        cwd: project,
+        env: { ...env, PI_AGENT_NAME: 'Holder' },
+        timeout: 20_000,
+      });
+    const verified = [
+      'task',
+      'done',
+      'task-1',
+      'new file',
+      '--verify',
+      'node -e "process.exit(0)"',
+    ];
+    await expect(holder(...verified)).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining('Failed to generate patch'),
+    });
+    expect(fs.existsSync(path.join(project, 'held-new.ts'))).toBe(false);
+    expect((await command('task', 'show', 'task-1')).stdout).toContain('Status: in_progress');
+    fs.rmSync(path.join(gitDir, 'index.lock'));
+    await holder(...verified);
+    expect(fs.readFileSync(path.join(project, 'held-new.ts'), 'utf8')).toContain('held');
   } finally {
     await command('abort').catch(() => {});
     provider.closeAllConnections();
     await new Promise<void>((resolve) => provider.close(() => resolve()));
   }
 }, 40_000);
+
+const as =
+  (name: string, cwd = project, extra: NodeJS.ProcessEnv = {}) =>
+  (...args: string[]) =>
+    exec(process.execPath, [cli, ...args], {
+      cwd,
+      env: { ...env, ...extra, PI_AGENT_NAME: name },
+      timeout: 20_000,
+    });
+
+it('creates no successor for pruned, finished or completed work, even after late exits and a restart', async () => {
+  await command('abort').catch(() => {});
+  const provider = createHttpServer(async (req, res) => {
+    for await (const _chunk of req) {
+      /* Every peer only holds its Sandbox. */
+    }
+    writeToolTurn(res, 'hold', 'pi-messenger-swarm run join && echo HOLDING && sleep 60');
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  try {
+    const started = JSON.parse(
+      (
+        await command(
+          'run',
+          'start',
+          '--goal',
+          'Forbidden replacement',
+          '--max-steps',
+          '50',
+          '--concurrency',
+          '3',
+          '--verify',
+          'node -e "process.exit(0)"'
+        )
+      ).stdout
+    );
+    await command('run', 'join');
+    await command('task', 'create', '--title', 'Pruned hypothesis');
+    await command('task', 'create', '--title', 'Finished work');
+    const ids: Record<string, string> = {};
+    for (const [task, name] of [
+      ['task-1', 'Pruned'],
+      ['task-2', 'Finisher'],
+    ]) {
+      await command(
+        'spawn',
+        '--task-id',
+        task,
+        '--name',
+        name,
+        '--model',
+        'fixture/fixture',
+        'hold'
+      );
+      ids[name] = spawnedId((await command('spawn', 'list')).stdout, name)!;
+      await vi.waitFor(
+        async () => expect((await command('ps', 'logs', ids[name])).stdout).toContain('HOLDING'),
+        { timeout: 15_000 }
+      );
+      await as(name)('task', 'claim', task);
+    }
+    for (let attempt = 0; attempt < 3; attempt++)
+      await expect(
+        as('Pruned')('task', 'done', 'task-1', 'fails', '--verify', 'node -e "process.exit(7)"')
+      ).rejects.toMatchObject({ code: 1 });
+    expect((await command('task', 'show', 'task-1')).stdout).toContain('Status: dead_end');
+
+    // The pruned peer's exit only arrives after the hypothesis was pruned.
+    const history = (await command('spawn', 'history')).stdout;
+    process.kill(await peerPid(command, ids.Pruned), 'SIGKILL');
+    await vi.waitFor(
+      async () => expect((await command('spawn', 'list')).stdout).not.toContain('Pruned'),
+      { timeout: 10_000 }
+    );
+    await sleep(1500);
+    expect(historyCount((await command('spawn', 'history')).stdout)).toBe(historyCount(history));
+    expect(JSON.parse((await command('run', 'show', started.id)).stdout).handoffs).toEqual({});
+    expect((await command('task', 'show', 'task-1')).stdout).toContain('Status: dead_end');
+
+    // Finished work leaves nothing eligible, so its peer's exit completes the run.
+    await as('Finisher')(
+      'task',
+      'done',
+      'task-2',
+      'finished',
+      '--verify',
+      'node -e "process.exit(0)"'
+    );
+    expect((await command('task', 'show', 'task-2')).stdout).toContain('Status: verified');
+    process.kill(await peerPid(command, ids.Finisher), 'SIGKILL');
+    await vi.waitFor(
+      async () =>
+        expect(JSON.parse((await command('run', 'show', started.id)).stdout).status).toBe(
+          'completed'
+        ),
+      { timeout: 15_000, interval: 300 }
+    );
+    expect(JSON.parse((await command('run', 'show', started.id)).stdout).handoffs).toEqual({});
+
+    // A restarted service re-reads both late exits of the archived run.
+    await coldRestart();
+    await sleep(1500);
+    expect(JSON.parse((await command('run', 'show', started.id)).stdout)).toMatchObject({
+      status: 'completed',
+      handoffs: {},
+    });
+    expect(JSON.parse((await command('run', 'status')).stdout).phase).toBe('No active run');
+  } finally {
+    await command('abort').catch(() => {});
+    provider.closeAllConnections();
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
+  }
+}, 70_000);
+
+it('admits exactly one successor per handoff across two services and a restart, and continues its accounting', async () => {
+  await command('abort').catch(() => {});
+  const successorRequests: string[] = [];
+  const provider = createHttpServer(async (req, res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    const handoff = raw.includes('Automatic Handoff for task-1');
+    if (handoff) successorRequests.push(raw);
+    const tools = (JSON.parse(raw).messages as Message[]).filter((m) => m.role === 'tool').length;
+    // The shell expands the name, so the marker exists only in real tool output.
+    if (!tools)
+      return writeToolTurn(
+        res,
+        'claim',
+        'pi-messenger-swarm run join && pi-messenger-swarm task claim task-1 && echo "CLAIMED_BY_$PI_AGENT_NAME"'
+      );
+    writeToolTurn(res, `hold_${tools}`, 'sleep 60');
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  const second = await secondService();
+  try {
+    await second('--start');
+    const started = JSON.parse(
+      (
+        await command(
+          'run',
+          'start',
+          '--goal',
+          'Exactly one successor',
+          '--max-steps',
+          '40',
+          '--concurrency',
+          '3'
+        )
+      ).stdout
+    );
+    // Two live callers cannot register one agent name at the same moment.
+    await command('run', 'join');
+    await second('run', 'join');
+    await command('task', 'create', '--title', 'Hand off once');
+    await command(
+      'spawn',
+      '--task-id',
+      'task-1',
+      '--name',
+      'Original',
+      '--model',
+      'fixture/fixture',
+      'Hand off once'
+    );
+    const originalId = spawnedId((await command('spawn', 'list')).stdout, 'Original')!;
+    await vi.waitFor(
+      async () => {
+        expect((await command('ps', 'logs', originalId)).stdout).toContain('CLAIMED_BY_Original');
+        expect(JSON.parse((await command('run', 'show', started.id)).stdout).consumedSteps).toBe(2);
+      },
+      { timeout: 15_000 }
+    );
+    await expect(
+      as('Original')(
+        'task',
+        'done',
+        'task-1',
+        'first attempt',
+        '--verify',
+        `node -e "console.error('ORIGINAL_FAILURE_EVIDENCE');process.exit(7)"`
+      )
+    ).rejects.toMatchObject({ code: 1 });
+    expect(JSON.parse((await command('run', 'show', started.id)).stdout)).toMatchObject({
+      maxSteps: 40,
+      consumedSteps: 2,
+    });
+    expect((await command('task', 'show', 'task-1')).stdout).toContain('Verification attempts: 1');
+
+    // Both services observe this one exit on every recovery tick.
+    process.kill(await peerPid(command, originalId), 'SIGKILL');
+    let successorId = '';
+    await vi.waitFor(
+      async () => {
+        const handoff = JSON.parse((await command('run', 'status')).stdout).handoffs['task-1'];
+        expect(handoff?.takenOver).toBe(true);
+        successorId = handoff.successor;
+      },
+      { timeout: 20_000, interval: 300 }
+    );
+    const history = (await command('spawn', 'history')).stdout;
+    const successorName = history.match(new RegExp(`^- ${successorId}: (\\S+) `, 'm'))?.[1];
+    expect(historyCount(history), history).toBe(2);
+    const logs = async () =>
+      (await command('ps', 'logs', successorId)).stdout +
+      (await second('ps', 'logs', successorId)).stdout;
+    expect(await logs()).toContain(`CLAIMED_BY_${successorName}`);
+    expect((await command('task', 'show', 'task-1')).stdout).toContain(
+      `Claimed by: ${successorName}`
+    );
+
+    // The successor's model saw the predecessor's failure and the remaining budget.
+    const prompt = (JSON.parse(successorRequests[0]).messages as Message[]).map(textOf).join('\n');
+    expect(prompt).toContain('Remaining budget: 38');
+    expect(prompt).toMatch(/Verification history: \{[^\n]*"exitCode":7/);
+    expect(prompt).toContain('ORIGINAL_FAILURE_EVIDENCE');
+    await vi.waitFor(
+      async () =>
+        expect(JSON.parse((await command('run', 'show', started.id)).stdout)).toMatchObject({
+          maxSteps: 40,
+          consumedSteps: 4,
+        }),
+      { timeout: 10_000 }
+    );
+    expect((await command('task', 'show', 'task-1')).stdout).toContain('Verification attempts: 1');
+
+    // A restarted service re-observes the same exit without a second successor.
+    await coldRestart();
+    await sleep(1500);
+    expect(historyCount((await command('spawn', 'history')).stdout)).toBe(2);
+    expect((await command('spawn', 'list')).stdout).toContain(successorName);
+    expect(JSON.parse((await command('run', 'status')).stdout).handoffs['task-1']).toMatchObject({
+      successor: successorId,
+      takenOver: true,
+      failures: 0,
+    });
+  } finally {
+    await command('abort').catch(() => {});
+    await second('--stop').catch(() => {});
+    provider.closeAllConnections();
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
+  }
+}, 70_000);
+
+it('counts a successor that does not claim within 30 seconds as one takeover failure', async () => {
+  await command('abort').catch(() => {});
+  const provider = createHttpServer(async (req, res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    if (raw.includes('Automatic Handoff for task-1'))
+      return writeToolTurn(res, 'idle', 'echo "IDLE_$PI_AGENT_NAME" && sleep 90');
+    writeToolTurn(
+      res,
+      'quit',
+      'pi-messenger-swarm run join && pi-messenger-swarm task claim task-1 && sleep 1 && kill -KILL "$PI_SWARM_PEER_PID"'
+    );
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  try {
+    await command('run', 'start', '--goal', 'Takeover deadline', '--max-steps', '40');
+    await command('run', 'join');
+    await command('task', 'create', '--title', 'Never claimed by the successor');
+    await command(
+      'spawn',
+      '--task-id',
+      'task-1',
+      '--name',
+      'Quitter',
+      '--model',
+      'fixture/fixture',
+      'exit after claiming'
+    );
+    let first = '';
+    await vi.waitFor(
+      async () => {
+        first = JSON.parse((await command('run', 'status')).stdout).handoffs['task-1']?.successor;
+        expect(first).toBeTruthy();
+        expect((await command('ps', 'logs', first)).stdout).toMatch(/IDLE_\w/);
+      },
+      { timeout: 20_000 }
+    );
+    await vi.waitFor(
+      async () => {
+        const handoff = JSON.parse((await command('run', 'status')).stdout).handoffs['task-1'];
+        expect(handoff.failures).toBe(1);
+        expect(handoff.errors[0]).toContain('Takeover timed out');
+      },
+      { timeout: 45_000, interval: 500 }
+    );
+    const handoff = JSON.parse((await command('run', 'status')).stdout).handoffs['task-1'];
+    expect(handoff.takenOver).not.toBe(true);
+    expect(handoff.suspended).not.toBe(true);
+    expect((await command('spawn', 'list')).stdout).not.toContain(`- ${first}:`);
+    expect((await command('task', 'show', 'task-1')).stdout).toContain('Verification attempts: 0');
+    expect((await command('task', 'show', 'task-1')).stdout).not.toContain('dead_end');
+  } finally {
+    await command('abort').catch(() => {});
+    provider.closeAllConnections();
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
+  }
+}, 80_000);
+
+it('runs the packaged journey from shared storage to archived acceptance and the next run', async () => {
+  await command('abort').catch(() => {});
+  const storage = path.join(root, 'journey-shared');
+  const journey = path.join(root, 'journey-a');
+  const neighbour = path.join(root, 'journey-b');
+  for (const dir of [journey, neighbour]) await initRepo(dir);
+  fs.writeFileSync(
+    path.join(journey, '.gitignore'),
+    '.pi/\n.swarm/\nBLACKBOARD.md\nnode_modules/\n'
+  );
+  fs.writeFileSync(path.join(journey, 'tracked.txt'), 'original\n');
+  fs.writeFileSync(
+    path.join(journey, 'accept.cjs'),
+    "const f=require('fs');if(f.readFileSync('tracked.txt','utf8')!=='journey\\n'||!f.existsSync('journey.ts'))process.exit(1)\n"
+  );
+  await run('git', ['add', '.'], journey);
+  await run('git', ['commit', '-m', 'journey baseline'], journey);
+  fs.mkdirSync(path.join(journey, 'node_modules'));
+  fs.writeFileSync(path.join(journey, 'node_modules', 'keep.txt'), 'host dependency\n');
+  fs.writeFileSync(path.join(journey, 'unrelated.txt'), 'not owned by the run\n');
+  const shared = { PI_MESSENGER_DIR: storage };
+  const a = as('Delegator', journey, shared);
+  const b = as('Delegator', neighbour, shared);
+  const seen = { hostCleanAfterFailure: false, attempts: '', successorPrompt: '' };
+  const provider = createHttpServer(async (req, res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    const messages: Message[] = JSON.parse(raw).messages;
+    const tools = messages.filter((m) => m.role === 'tool').length;
+    if (raw.includes('Hold in neighbour'))
+      return writeToolTurn(
+        res,
+        'neighbour',
+        'pi-messenger-swarm run join && pi-messenger-swarm task claim task-1 && echo "NEIGHBOUR_$PI_AGENT_NAME" && sleep 120'
+      );
+    if (raw.includes('Automatic Handoff for task-1')) {
+      if (!tools) {
+        seen.successorPrompt = messages.map(textOf).join('\n');
+        return writeToolTurn(
+          res,
+          'restore',
+          `pi-messenger-swarm run join && pi-messenger-swarm task claim task-1 && pi-messenger-swarm candidate restore latest --task task-1 && (pi-messenger-swarm task done task-1 'Unverified journey' --verify 'node -e "process.exit(9)"'; sleep 2)`
+        );
+      }
+      if (unanswered(messages, 'Incident: verif-task-1-2', 'HANDLED_REVERIFY')) {
+        seen.hostCleanAfterFailure =
+          fs.readFileSync(path.join(journey, 'tracked.txt'), 'utf8') === 'original\n' &&
+          !fs.existsSync(path.join(journey, 'journey.ts'));
+        seen.attempts = (await a('task', 'show', 'task-1')).stdout;
+        return writeTurn(res, [
+          say('HANDLED_REVERIFY'),
+          bash(
+            'reverify',
+            `pi-messenger-swarm task done task-1 'Verified journey' --verify 'node accept.cjs'`
+          ),
+        ]);
+      }
+      return writeTurn(res, [say('JOURNEY_STEP_DONE')]);
+    }
+    if (!tools)
+      return writeToolTurn(
+        res,
+        'attempt',
+        `pi-messenger-swarm run join && pi-messenger-swarm task claim task-1 && printf 'journey\\n' > tracked.txt && printf 'export const journey = true;\\n' > journey.ts && (pi-messenger-swarm task done task-1 'first attempt' --verify 'node -e "process.exit(7)"'; sleep 2)`
+      );
+    if (unanswered(messages, 'Incident: verif-task-1-1', 'HANDLED_VERIFICATION'))
+      return writeTurn(res, [
+        say('HANDLED_VERIFICATION'),
+        bash('crash', 'sleep 4 && kill -KILL "$PI_SWARM_PEER_PID"'),
+      ]);
+    writeTurn(res, [say('WAITING')]);
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  try {
+    // Two Projects share messaging storage, each with a peer named Twin.
+    const started = JSON.parse(
+      (
+        await a(
+          'run',
+          'start',
+          '--goal',
+          'Packaged journey',
+          '--max-steps',
+          '30',
+          '--verify',
+          'node accept.cjs'
+        )
+      ).stdout
+    );
+    await a('run', 'join');
+    await a('task', 'create', '--title', 'Journey task');
+    const neighbourRun = JSON.parse((await b('run', 'start', '--goal', 'Neighbour')).stdout);
+    await b('run', 'join');
+    await b('task', 'create', '--title', 'Neighbour task');
+    await b(
+      'spawn',
+      '--task-id',
+      'task-1',
+      '--name',
+      'Twin',
+      '--model',
+      'fixture/fixture',
+      'Hold in neighbour'
+    );
+    const neighbourId = spawnedId((await b('spawn', 'list')).stdout, 'Twin')!;
+    await vi.waitFor(
+      async () => expect((await b('ps', 'logs', neighbourId)).stdout).toContain('NEIGHBOUR_Twin'),
+      { timeout: 15_000 }
+    );
+    await a(
+      'spawn',
+      '--task-id',
+      'task-1',
+      '--name',
+      'Twin',
+      '--model',
+      'fixture/fixture',
+      'Begin journey'
+    );
+    const twinId = spawnedId((await a('spawn', 'list')).stdout, 'Twin')!;
+
+    // A real critical failure reaches the live Twin in this Project only.
+    await vi.waitFor(
+      async () => {
+        expect(replies((await a('ps', 'logs', twinId)).stdout, 'HANDLED_VERIFICATION')).toBe(1);
+        expect(JSON.parse((await a('notifications')).stdout)).toEqual([
+          expect.objectContaining({
+            id: 'verif-task-1-1',
+            project: journey,
+            runId: started.id,
+            to: 'Twin',
+            taskId: 'task-1',
+            status: 'handled',
+          }),
+        ]);
+      },
+      { timeout: 20_000, interval: 200 }
+    );
+
+    // The Twin then exits unexpectedly, leaving an unverified candidate.
+    await vi.waitFor(
+      async () =>
+        expect(
+          JSON.parse((await a('candidate', 'list', '--task', 'task-1')).stdout)[0]
+        ).toMatchObject({
+          project: journey,
+          runId: started.id,
+          peer: 'Twin',
+          status: 'unverified',
+        }),
+      { timeout: 20_000 }
+    );
+    await vi.waitFor(
+      async () =>
+        expect(JSON.parse((await a('run', 'show', started.id)).stdout).status).toBe('completed'),
+      { timeout: 60_000, interval: 500 }
+    );
+
+    // Unchanged accounting: two predecessor steps, then two successor steps.
+    expect(seen.successorPrompt).toContain('Remaining budget: 28');
+    expect(seen.successorPrompt).toMatch(/Verification history: \{[^\n]*"exitCode":7/);
+    expect(seen.attempts).toContain('Verification attempts: 2');
+    expect(seen.hostCleanAfterFailure).toBe(true);
+    const archived = JSON.parse((await a('run', 'show', started.id)).stdout);
+    expect(archived).toMatchObject({ maxSteps: 30, consumedSteps: 4 });
+    expect(archived.acceptance.exitCode).toBe(0);
+    expect(fs.readFileSync(path.join(journey, 'tracked.txt'), 'utf8')).toBe('journey\n');
+    expect(fs.readFileSync(path.join(journey, 'journey.ts'), 'utf8')).toContain('journey');
+    expect((await run('git', ['status', '--porcelain'], journey)).stdout.trim()).toBe(
+      '?? unrelated.txt'
+    );
+    const next = JSON.parse((await a('run', 'start', '--goal', 'Next journey')).stdout);
+    expect(next.id).not.toBe(started.id);
+
+    // The neighbour never saw the incident and its run is untouched.
+    expect((await b('ps', 'logs', neighbourId)).stdout).not.toContain('verif-task-1');
+    expect(JSON.parse((await b('notifications')).stdout)).toEqual([]);
+    expect((await b('task', 'list')).stdout).not.toContain('Journey task');
+    const neighbourPid = await peerPid(b, neighbourId);
+
+    // Service recovery keeps host dependencies and resources this run does not own.
+    await coldRestart();
+    expect(fs.readFileSync(path.join(journey, 'node_modules', 'keep.txt'), 'utf8')).toBe(
+      'host dependency\n'
+    );
+    expect(fs.readFileSync(path.join(journey, 'unrelated.txt'), 'utf8')).toBe(
+      'not owned by the run\n'
+    );
+    expect(() => process.kill(neighbourPid, 0)).not.toThrow();
+    expect(
+      fs.existsSync(path.join(neighbour, '.swarm', 'workspaces', `worker-${neighbourId}`))
+    ).toBe(true);
+    expect(JSON.parse((await b('run', 'status')).stdout)).toMatchObject({
+      id: neighbourRun.id,
+      status: 'active',
+      consumedSteps: 1,
+    });
+    expect(JSON.parse((await a('run', 'status')).stdout)).toMatchObject({ id: next.id });
+  } finally {
+    await a('abort').catch(() => {});
+    await b('abort').catch(() => {});
+    provider.closeAllConnections();
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
+  }
+}, 120_000);

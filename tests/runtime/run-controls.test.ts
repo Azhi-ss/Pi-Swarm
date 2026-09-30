@@ -4,7 +4,7 @@
  * the Pi host records on tool activity.
  */
 import { execFile, spawnSync } from 'node:child_process';
-import { createServer } from 'node:net';
+import { reservePort } from '../helpers/ports.js';
 import { promisify } from 'node:util';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
@@ -74,10 +74,7 @@ wait
 `
   );
   fs.chmodSync(path.join(stubDir, 'pi'), 0o755);
-  const socket = createServer();
-  await new Promise<void>((resolve) => socket.listen(0, '127.0.0.1', resolve));
-  port = (socket.address() as { port: number }).port;
-  await new Promise<void>((resolve) => socket.close(() => resolve()));
+  port = await reservePort();
   env = {
     ...process.env,
     PATH: `${stubDir}${path.delimiter}${process.env.PATH ?? ''}`,

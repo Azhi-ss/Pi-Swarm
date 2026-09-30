@@ -4,7 +4,7 @@
  * Storage cases also cover sandbox task association and ordinary inbox delivery.
  */
 import { execFile } from 'node:child_process';
-import { createServer } from 'node:net';
+import { reservePort } from '../helpers/ports.js';
 import { promisify } from 'node:util';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
@@ -51,10 +51,7 @@ function invoke(cwd: string, args: string[], extra: NodeJS.ProcessEnv = {}) {
 }
 
 beforeAll(async () => {
-  const socket = createServer();
-  await new Promise<void>((resolve) => socket.listen(0, '127.0.0.1', resolve));
-  port = (socket.address() as { port: number }).port;
-  await new Promise<void>((resolve) => socket.close(() => resolve()));
+  port = await reservePort();
   env = {
     ...process.env,
     PI_SWARM_PROJECT_ROOT: '',

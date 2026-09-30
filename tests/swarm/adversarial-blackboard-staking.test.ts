@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -258,33 +258,40 @@ describe('Adversarial Test Suite: Module 3 Four-Zone Blackboard & Soft Staking w
       expect(current.status).toBe('staked');
     });
 
-    it('progress heartbeat extends lease expiration and prevents premature preemption', async () => {
-      const task = taskStore.createTask(cwd, sessionId, { title: 'Heartbeat task' }, 'dev');
-      taskStore.stakeTask(cwd, sessionId, task.id, 'Agent-HB', { ttl: 2 }); // 2-second lease
+    it('progress heartbeat extends lease expiration and prevents premature preemption', () => {
+      // Lease arithmetic uses wall time; a frozen clock keeps it independent of machine load.
+      vi.useFakeTimers({ toFake: ['Date'] });
+      const start = Date.now();
+      try {
+        const task = taskStore.createTask(cwd, sessionId, { title: 'Heartbeat task' }, 'dev');
+        taskStore.stakeTask(cwd, sessionId, task.id, 'Agent-HB', { ttl: 2 }); // 2-second lease
 
-      // At 800ms, agent posts progress
-      await sleep(800);
-      taskStore.appendTaskProgress(cwd, sessionId, task.id, 'Agent-HB', 'Processing chunk 1/3');
+        // At 800ms, agent posts progress
+        vi.setSystemTime(start + 800);
+        taskStore.appendTaskProgress(cwd, sessionId, task.id, 'Agent-HB', 'Processing chunk 1/3');
 
-      // Verify lease expiration was bumped forward
-      const refreshedTask = taskStore.getTask(cwd, sessionId, task.id)!;
-      const initialStakeTime = Date.parse(refreshedTask.claimed_at!);
-      const currentExpiry = Date.parse(refreshedTask.lease_expires_at!);
-      // Expiration is now 2s from progress timestamp, which is > initialStakeTime + 2000
-      expect(currentExpiry).toBeGreaterThan(initialStakeTime + 2000);
+        // Verify lease expiration was bumped forward
+        const refreshedTask = taskStore.getTask(cwd, sessionId, task.id)!;
+        const initialStakeTime = Date.parse(refreshedTask.claimed_at!);
+        const currentExpiry = Date.parse(refreshedTask.lease_expires_at!);
+        // Expiration is now 2s from progress timestamp, which is > initialStakeTime + 2000
+        expect(currentExpiry).toBeGreaterThan(initialStakeTime + 2000);
 
-      // At 2100ms from start (which would have expired the initial 2s lease):
-      await sleep(1300); // 800 + 1300 = 2100ms from start
-      // Agent-B attempts to preempt -> must be rejected because progress kept it alive!
-      const preemptFail = taskStore.stakeTask(cwd, sessionId, task.id, 'Agent-Preempt');
-      expect(preemptFail).toBeNull();
+        // At 2100ms from start (which would have expired the initial 2s lease):
+        vi.setSystemTime(start + 2100);
+        // Agent-B attempts to preempt -> must be rejected because progress kept it alive!
+        const preemptFail = taskStore.stakeTask(cwd, sessionId, task.id, 'Agent-Preempt');
+        expect(preemptFail).toBeNull();
 
-      // Now wait until the refreshed lease expires (progress was at 800ms + 2000ms = 2800ms)
-      await sleep(1100); // 2100 + 1100 = 3200ms from start
-      const preemptSuccess = taskStore.stakeTask(cwd, sessionId, task.id, 'Agent-Preempt');
-      expect(preemptSuccess).not.toBeNull();
-      expect(preemptSuccess!.claimed_by).toBe('Agent-Preempt');
-    }, 10000);
+        // Now wait until the refreshed lease expires (progress was at 800ms + 2000ms = 2800ms)
+        vi.setSystemTime(start + 3200);
+        const preemptSuccess = taskStore.stakeTask(cwd, sessionId, task.id, 'Agent-Preempt');
+        expect(preemptSuccess).not.toBeNull();
+        expect(preemptSuccess!.claimed_by).toBe('Agent-Preempt');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   // =========================================================================

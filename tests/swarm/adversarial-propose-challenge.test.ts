@@ -10,6 +10,7 @@ import { executeAction } from '../../router.js';
 import { splitCliArgs, findCommandSpec } from '../../harness/commands.js';
 import { readFeedEvents, formatFeedLine, pruneFeed } from '../../feed/index.js';
 import type { MessengerState, Dirs } from '../../lib.js';
+import { reservePort } from '../helpers/ports.js';
 
 const roots = new Set<string>();
 const TEST_SESSION = 'adv-test-session';
@@ -907,10 +908,10 @@ describe('Suite 7: Adversarial — Parameter aliases, blocked task debate, and E
     expect(replayed?.challenges).toHaveLength(1);
   });
 
-  it('executes full CLI lifecycle end-to-end over HTTP server without crashing', () => {
+  it('executes full CLI lifecycle end-to-end over HTTP server without crashing', async () => {
     const cwd = createTempCwd();
     const cliPath = path.resolve(__dirname, '../../dist/harness/cli.js');
-    const port = String(20000 + Math.floor(Math.random() * 5000));
+    const port = String(await reservePort());
     const messengerDir = path.join(cwd, '.pi', 'messenger');
 
     const env = {
