@@ -5,6 +5,7 @@ import { isProcessAlive } from '../../lib.js';
 import type { SwarmTask } from '../types.js';
 import { readRun, startRun, updateRun, endRun } from '../run-store.js';
 import { listSpawned } from '../spawn.js';
+import { computeWidth } from '../width.js';
 import { getAllTasks, getTasksJsonlPath, writeBlackboard } from '../task-store.js';
 import { forceKillProcessGroup } from '../process-manager.js';
 import { result } from '../result.js';
@@ -19,6 +20,7 @@ export function runStatus(cwd: string) {
     phase: live ? 'Running' : 'Awaiting Handoff',
     livePeers: live,
     remainingSteps: Math.max(0, run.maxSteps - run.consumedSteps),
+    width: computeWidth(cwd, run),
   };
 }
 

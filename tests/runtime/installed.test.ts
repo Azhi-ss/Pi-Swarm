@@ -752,7 +752,7 @@ it('aborts one project without tripping another project sharing its service and 
 
 it('persists an exhausted budget and physically stops peers without creating replacements', async () => {
   const started = JSON.parse(
-    (await command('run', 'start', '--goal', 'Bound actual execution', '--max-steps', '3')).stdout
+    (await command('run', 'start', '--goal', 'Bound actual execution', '--max-steps', '5')).stdout
   );
   await command('run', 'join');
   await command('task', 'create', '--title', 'Consume bounded steps');
@@ -771,14 +771,14 @@ it('persists an exhausted budget and physically stops peers without creating rep
       async () =>
         expect(JSON.parse((await command('run', 'show', started.id)).stdout)).toMatchObject({
           status: 'aborted',
-          consumedSteps: 3,
+          consumedSteps: 5,
         }),
       { timeout: 15_000 }
     );
     await coldRestart();
     expect(JSON.parse((await command('run', 'show', started.id)).stdout)).toMatchObject({
       status: 'aborted',
-      consumedSteps: 3,
+      consumedSteps: 5,
       handoffs: {},
     });
     await vi.waitFor(
@@ -860,7 +860,7 @@ it('shares spawn admission between two installed service processes', async () =>
     expect(admissions.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
     expect(
       (admissions.find((r) => r.status === 'rejected') as PromiseRejectedResult).reason.stderr
-    ).toContain('concurrency');
+    ).toContain('Limited by: run-cap');
 
     await command('abort');
     await command('run', 'start', '--goal', 'Bound duplicate recovery', '--concurrency', '3');
@@ -914,6 +914,293 @@ it('shares spawn admission between two installed service processes', async () =>
     await new Promise<void>((resolve) => provider.close(() => resolve()));
   }
 }, 30_000);
+
+const hostConfig = () => path.join(project, '.pi/pi-messenger.json');
+const setHostWidthCap = (n: number) =>
+  fs.writeFileSync(hostConfig(), JSON.stringify({ maxConcurrentSpawns: n }));
+const board = () => fs.readFileSync(path.join(project, 'BLACKBOARD.md'), 'utf8');
+const runStatus = async () => JSON.parse((await command('run', 'status')).stdout);
+const spawnedPids = (runId: string) => {
+  const events = fs
+    .readFileSync(path.join(project, '.pi/messenger/agents', `${runId}.jsonl`), 'utf8')
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+  return events
+    .filter((event) => event.type === 'spawned')
+    .map((spawned) => ({
+      taskId: spawned.agent.taskId as string,
+      pid: events.find((event) => event.id === spawned.id && event.agent.pid)?.agent.pid as number,
+    }));
+};
+const pidAlive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+const defaultBudget = (runWidthCap: number) => Math.max(50, Math.ceil((50 * runWidthCap) / 3));
+
+it('derives the Run Width Cap and default budget from the one Host Width Cap entry', async () => {
+  await command('abort').catch(() => {});
+  const hostDefault = Math.min(6, Math.max(1, os.availableParallelism() - 1));
+  const started = async (...args: string[]) => {
+    const record = JSON.parse(
+      (await command('run', 'start', '--goal', 'Width defaults', ...args)).stdout
+    );
+    await command('abort');
+    return record;
+  };
+  try {
+    expect(await started()).toMatchObject({
+      concurrency: hostDefault,
+      maxSteps: defaultBudget(hostDefault),
+    });
+    for (const [width, maxSteps] of [
+      [6, 100],
+      [3, 50],
+      [2, 50],
+    ])
+      expect(await started('--concurrency', String(width))).toMatchObject({
+        concurrency: width,
+        maxSteps,
+      });
+    expect(await started('--concurrency', '6', '--max-steps', '7')).toMatchObject({
+      concurrency: 6,
+      maxSteps: 7,
+    });
+    for (const invalid of ['60', '0', '1.5', 'many'])
+      await expect(
+        command('run', 'start', '--goal', 'Invalid width', '--concurrency', invalid)
+      ).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('concurrency') });
+    expect((await runStatus()).phase).toBe('No active run');
+
+    setHostWidthCap(60);
+    expect(
+      JSON.parse((await command('run', 'start', '--goal', 'Port slot width')).stdout)
+    ).toMatchObject({ concurrency: 50, maxSteps: defaultBudget(50) });
+    expect((await runStatus()).width).toEqual({
+      live: 0,
+      cap: 50,
+      run: 50,
+      host: 50,
+      budget: Math.floor(defaultBudget(50) / 5),
+      openDemand: 0,
+      idle: 0,
+      fill: 'off',
+      limiter: 'port-slots',
+    });
+    await vi.waitFor(() =>
+      expect(board()).toContain(
+        `> Width: 0/50 (run 50, host 50, budget ${Math.floor(defaultBudget(50) / 5)}) | Open Demand: 0 | Idle: 0 | Fill: off | Limited by: port-slots`
+      )
+    );
+    expect((await command('status')).stdout).toContain(
+      `Width: 0/50 (run 50, host 50, budget ${Math.floor(defaultBudget(50) / 5)}) | Open Demand: 0 | Idle: 0 | Fill: off | Limited by: port-slots`
+    );
+  } finally {
+    await command('abort').catch(() => {});
+    fs.rmSync(hostConfig(), { force: true });
+  }
+}, 30_000);
+
+it('converges explicit spawn and Automatic Handoff on the live Host Width Cap', async () => {
+  await command('abort').catch(() => {});
+  // Hold model requests so admitted peers stay alive without claiming.
+  const provider = createHttpServer(async (req) => {
+    for await (const _chunk of req) {
+    }
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  const isolated = path.join(root, 'isolated-width');
+  const iso = (...args: string[]) => run(process.execPath, [cli, ...args], isolated);
+  const spawnFor = (taskId: string) =>
+    command('spawn', '--task-id', taskId, '--model', 'fixture/fixture', `Hold ${taskId}`);
+  try {
+    setHostWidthCap(2);
+    const started = JSON.parse(
+      (await command('run', 'start', '--goal', 'Converge width', '--concurrency', '5')).stdout
+    );
+    expect(started).toMatchObject({ concurrency: 5, maxSteps: defaultBudget(5) });
+    await command('run', 'join');
+    for (let i = 1; i <= 4; i++) await command('task', 'create', '--title', `Width task ${i}`);
+    await spawnFor('task-1');
+    await spawnFor('task-2');
+    await expect(spawnFor('task-3')).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining('Limited by: host-cap'),
+    });
+    expect(spawnedPids(started.id)).toHaveLength(2);
+    expect((await runStatus()).width).toMatchObject({
+      live: 2,
+      cap: 2,
+      run: 5,
+      host: 2,
+      openDemand: 2,
+      idle: 2,
+      fill: 'off',
+      limiter: 'host-cap',
+    });
+    await vi.waitFor(() =>
+      expect(board()).toMatch(
+        /^> Width: 2\/2 \(run 5, host 2, budget \d+\) \| Open Demand: 2 \| Idle: 2 \| Fill: off \| Limited by: host-cap$/m
+      )
+    );
+    expect(board()).toMatch(/^> Updated: \S+ \| Project: .+ \| Run: \S+ \| Active Peers: \d+$/m);
+    expect((await command('status')).stdout).toMatch(
+      /Width: 2\/2 \(run 5, host 2, budget \d+\) \| Open Demand: 2 \| Idle: 2 \| Fill: off \| Limited by: host-cap/
+    );
+
+    // Project Y admits while Project X is at full width.
+    fs.mkdirSync(isolated);
+    await run('git', ['init'], isolated);
+    await run(
+      'git',
+      [
+        '-c',
+        'user.email=t@example.test',
+        '-c',
+        'user.name=T',
+        'commit',
+        '--allow-empty',
+        '-m',
+        'i',
+      ],
+      isolated
+    );
+    await iso('run', 'start', '--goal', 'Isolated width');
+    await iso('run', 'join');
+    await iso('task', 'create', '--title', 'Isolated task');
+    await iso('spawn', '--task-id', 'task-1', '--model', 'fixture/fixture', 'Hold isolated');
+    expect(JSON.parse((await iso('run', 'status')).stdout).width).toMatchObject({ live: 1 });
+    await iso('abort');
+
+    // A config change reaches the next explicit spawn without a service restart.
+    setHostWidthCap(3);
+    await spawnFor('task-3');
+    expect(await runStatus()).toMatchObject({
+      concurrency: 5,
+      maxSteps: defaultBudget(5),
+      width: { live: 3, cap: 3, host: 3 },
+    });
+
+    // At full width a successor is deferred, not failed, until the cap is raised.
+    setHostWidthCap(2);
+    const victim = spawnedPids(started.id).find((p) => p.taskId === 'task-3')!;
+    process.kill(victim.pid, 'SIGKILL');
+    await vi.waitFor(async () => expect((await runStatus()).width.live).toBe(2), {
+      timeout: 10_000,
+    });
+    for (const deadline = Date.now() + 1500; Date.now() < deadline; ) {
+      expect((await runStatus()).width).toMatchObject({ live: 2, cap: 2 });
+      expect(spawnedPids(started.id).filter((p) => pidAlive(p.pid)).length).toBeLessThanOrEqual(2);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+    expect(spawnedPids(started.id)).toHaveLength(3);
+    setHostWidthCap(3);
+    await vi.waitFor(() => expect(spawnedPids(started.id)).toHaveLength(4), { timeout: 10_000 });
+    const after = await runStatus();
+    expect(after).toMatchObject({
+      concurrency: 5,
+      maxSteps: defaultBudget(5),
+      width: { live: 3, cap: 3 },
+    });
+    expect(after.handoffs['task-3']).toMatchObject({ failures: 0 });
+    expect(after.handoffs['task-3'].successor).toBeTruthy();
+    expect(spawnedPids(started.id).filter((p) => pidAlive(p.pid))).toHaveLength(3);
+  } finally {
+    await command('abort').catch(() => {});
+    await iso('abort').catch(() => {});
+    fs.rmSync(hostConfig(), { force: true });
+    provider.closeAllConnections();
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
+  }
+}, 60_000);
+
+it('narrows Width to the remaining budget and trips the breaker without changing it', async () => {
+  await command('abort').catch(() => {});
+  let released = false;
+  const held: import('node:http').ServerResponse[] = [];
+  let call = 0;
+  const provider = createHttpServer(async (req, res) => {
+    for await (const _chunk of req) {
+    }
+    if (!released) return void held.push(res);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    writeToolTurn(res, `call_${++call}`, 'true');
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  const spawnFor = (taskId: string) =>
+    command('spawn', '--task-id', taskId, '--model', 'fixture/fixture', `Work ${taskId}`);
+  try {
+    setHostWidthCap(6);
+    const started = JSON.parse(
+      (
+        await command(
+          'run',
+          'start',
+          '--goal',
+          'Budget width',
+          '--max-steps',
+          '12',
+          '--concurrency',
+          '6'
+        )
+      ).stdout
+    );
+    expect(started).toMatchObject({ concurrency: 6, maxSteps: 12 });
+    await command('run', 'join');
+    for (let i = 1; i <= 3; i++) await command('task', 'create', '--title', `Budget task ${i}`);
+    expect((await runStatus()).width).toMatchObject({ cap: 2, budget: 2, limiter: 'budget' });
+    await spawnFor('task-1');
+    await spawnFor('task-2');
+    await expect(spawnFor('task-3')).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining('Limited by: budget'),
+    });
+    expect((await runStatus()).width).toMatchObject({ live: 2, cap: 2, limiter: 'budget' });
+    await vi.waitFor(() => expect(board()).toMatch(/^> Width: 2\/2 .*Limited by: budget$/m));
+
+    released = true;
+    for (const res of held.splice(0)) writeToolTurn(res, `call_${++call}`, 'true');
+    let consumed = 0;
+    let sawNarrowed = false;
+    await vi.waitFor(
+      async () => {
+        const record = JSON.parse((await command('run', 'show', started.id)).stdout);
+        expect(record.maxSteps).toBe(12);
+        expect(record.consumedSteps).toBeGreaterThanOrEqual(consumed);
+        consumed = record.consumedSteps;
+        expect(spawnedPids(started.id)).toHaveLength(2);
+        const status = await runStatus();
+        if (status.id === started.id && status.width.budget === 1) {
+          // Budget Width dropping below Width never stops live peers.
+          expect(status.width.live).toBe(2);
+          sawNarrowed = true;
+        }
+        expect(record.status).toBe('aborted');
+      },
+      { timeout: 30_000, interval: 100 }
+    );
+    expect(sawNarrowed).toBe(true);
+    await expect(spawnFor('task-3')).rejects.toMatchObject({ code: 1 });
+    expect(spawnedPids(started.id)).toHaveLength(2);
+    const stopped = JSON.parse((await command('run', 'show', started.id)).stdout);
+    expect(stopped.maxSteps).toBe(12);
+    expect(stopped.consumedSteps).toBeGreaterThanOrEqual(consumed);
+  } finally {
+    await command('abort').catch(() => {});
+    fs.rmSync(hostConfig(), { force: true });
+    provider.closeAllConnections();
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
+  }
+}, 60_000);
 
 it('kills the selected run evaluator before a later run can be affected', async () => {
   const marker = path.join(project, '.pi', 'abort-acceptance-started');

@@ -450,7 +450,7 @@ async function main(): Promise<void> {
 
 Usage:
   pi-messenger-swarm [--project <path>] <command>
-  pi-messenger-swarm run start --goal "..." [--max-steps 50] [--concurrency 3] [--verify "..."]
+  pi-messenger-swarm run start --goal "..." [--max-steps N] [--concurrency 1-50] [--verify "..."]
   pi-messenger-swarm run join | run status | run show <id> | run accept
   pi-messenger-swarm inbox | notifications
   pi-messenger-swarm candidate list [--task <id>]

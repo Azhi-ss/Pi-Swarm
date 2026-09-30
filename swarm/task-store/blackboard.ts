@@ -5,6 +5,7 @@ import type { SwarmTask } from '../types.js';
 import { getAllTasks, getSummaryForTasks } from './queries.js';
 import { isProcessAlive } from '../../lib.js';
 import { getCircuitBreaker } from '../circuit-breaker/index.js';
+import { computeWidth, formatWidth } from '../width.js';
 
 interface ActivePeerInfo {
   name: string;
@@ -87,6 +88,7 @@ export function generateBlackboard(cwd: string, sessionId: string): string {
       ? `Project: ${cwd} | Run: ${sessionId}`
       : `Session: ${sessionId}`;
   lines.push(`> Updated: ${timestamp} | ${identity} | Active Peers: ${peers.length}`);
+  if (activeRunId(cwd) === sessionId) lines.push(`> ${formatWidth(computeWidth(cwd))}`);
   lines.push(
     `> Progress: Total: ${summary.total} | Goals: ${goalTasks.length} | Staked: ${stakedTasks.length} | Verified: ${verifiedTasks.length} | Dead Ends: ${graveyardTasks.length}`
   );

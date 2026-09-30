@@ -9,6 +9,7 @@ import { normalizeCwd } from '../../store/shared.js';
 import { processManager } from '../process-manager.js';
 import { listSpawned } from '../spawn.js';
 import { result } from '../result.js';
+import { formatWidth } from '../width.js';
 
 const zoneNames = ['Goal', 'Soft Staking', 'Verified', 'Graveyard'];
 
@@ -135,6 +136,7 @@ export function executeObserverStatus(
   );
   const run = runStatus(cwd);
   lines.push(`Project: ${cwd}`, `Run: ${'id' in run ? run.id : 'none'} · ${run.phase}`);
+  if ('width' in run) lines.push(formatWidth(run.width));
   lines.push(...limitLines(cwd));
   lines.push('\x1b[1m│ Active Peers (PID)\x1b[0m');
   lines.push(...peerLines(workers));

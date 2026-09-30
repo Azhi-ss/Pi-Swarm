@@ -1,5 +1,5 @@
-import { loadConfig } from '../config.js';
 import { preserveCandidate } from './candidates.js';
+import { computeWidth, widthFullMessage } from './width.js';
 import { readRun } from './run-store.js';
 import { messengerDirs, activeRunId, peerBelongsToProject } from '../project.js';
 import * as fs from 'node:fs';
@@ -538,11 +538,8 @@ export function spawnSubagent(
     throw new Error('Run is no longer eligible for a peer.');
   if (run?.acceptanceOwner && isProcessAlive(run.acceptanceOwner))
     throw new Error('Overall Goal Acceptance is running; peer admission is paused.');
-  if (
-    run &&
-    getRunningSpawnCount(cwd) >= Math.min(run.concurrency, loadConfig(cwd).maxConcurrentSpawns)
-  )
-    throw new Error('Run concurrency limit reached.');
+  const width = run && computeWidth(cwd, run);
+  if (width && width.live >= width.cap) throw new Error(widthFullMessage(width));
   const id = randomUUID().slice(0, 8);
   const name = request.name?.trim() || generateMemorableName();
   const startedAt = new Date().toISOString();

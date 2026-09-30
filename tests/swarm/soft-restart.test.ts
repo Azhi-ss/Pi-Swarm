@@ -175,7 +175,9 @@ describe('harness server soft restart', () => {
 
       // If server had used its startup cwd, it would have gotten default
       const serverConfig = loadConfig(projectA);
-      expect(serverConfig.maxConcurrentSpawns).toBe(3);
+      expect(serverConfig.maxConcurrentSpawns).toBe(
+        Math.min(6, Math.max(1, os.availableParallelism() - 1))
+      );
     });
 
     it('registration cwd overrides server startup cwd', () => {

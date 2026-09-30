@@ -30,7 +30,6 @@ export interface RouterConfig {
   swarmEventsInFeed?: boolean;
   nameTheme?: NameThemeConfig;
   feedRetention?: number;
-  maxConcurrentSpawns?: number;
 }
 
 export async function executeAction(
@@ -484,7 +483,7 @@ export async function executeAction(
       return handlers.executeChannels(state, dirs, cwd, params.showAll ? true : undefined);
 
     case 'spawn':
-      return executeSpawn(op, params, state, cwd, sessionId, config?.maxConcurrentSpawns);
+      return executeSpawn(op, params, state, cwd, sessionId);
 
     default:
       return result(`Unknown action: ${action}`, {

@@ -10,6 +10,7 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { availableParallelism } from 'node:os';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
 
 export interface MessengerConfig {
@@ -46,7 +47,8 @@ const DEFAULT_CONFIG: MessengerConfig = {
   autoStatus: true,
   autoOverlay: true,
   swarmEventsInFeed: true,
-  maxConcurrentSpawns: 3,
+  // Host Width Cap: bounds bursts against the model provider and protects small machines.
+  maxConcurrentSpawns: Math.min(6, Math.max(1, availableParallelism() - 1)),
 };
 
 function readJsonFile(path: string): Record<string, unknown> | null {

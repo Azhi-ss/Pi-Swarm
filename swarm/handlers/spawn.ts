@@ -7,7 +7,6 @@ import { logFeedEvent } from '../../feed/index.js';
 import * as taskStore from '../task-store.js';
 import {
   cleanupExitedSpawned,
-  getRunningSpawnCount,
   listSpawned,
   listSpawnedHistory,
   reconcileSpawnedAgents,
@@ -17,20 +16,20 @@ import {
 import type { SpawnRequest } from '../types.js';
 import { formatRoleLabel } from '../labels.js';
 import { getCircuitBreaker } from '../circuit-breaker/index.js';
+import { computeWidth, widthFullMessage } from '../width.js';
 
 export function executeSpawn(
   op: string | null,
   params: MessengerActionParams,
   state: MessengerState,
   cwd: string,
-  sessionId: string,
-  maxConcurrentSpawns?: number
+  sessionId: string
 ) {
   cleanupExitedSpawned(cwd, sessionId);
   reconcileSpawnedAgents(cwd, sessionId);
 
   if (!op) {
-    return spawnCreate(params, state, cwd, sessionId, maxConcurrentSpawns);
+    return spawnCreate(params, state, cwd, sessionId);
   }
 
   if (op === 'list') {
@@ -165,8 +164,7 @@ function spawnCreate(
   params: MessengerActionParams,
   state: MessengerState,
   cwd: string,
-  sessionId: string,
-  maxConcurrentSpawns?: number
+  sessionId: string
 ) {
   if (getCircuitBreaker(cwd, sessionId).isTripped()) {
     return result('Error: Circuit breaker is tripped. Spawning new agents is locked.', {
@@ -196,23 +194,19 @@ function spawnCreate(
     }
   }
 
-  // Enforce concurrency limit to prevent thundering-herd API failures.
+  // Enforce the Width Cap to prevent thundering-herd API failures.
   // When more subagents run than the provider supports concurrently,
   // excess agents hit rate limits and spin on retries — wasting tokens
   // and making the whole swarm appear stuck.
-  const running = getRunningSpawnCount(cwd);
-  const limit = maxConcurrentSpawns ?? 3;
-  if (running >= limit) {
-    return result(
-      `Error: ${running} subagent${running === 1 ? '' : 's'} already running (limit: ${limit}). ` +
-        `Wait for one to complete or increase maxConcurrentSpawns in .pi/pi-messenger.json.`,
-      {
-        mode: 'spawn',
-        error: 'concurrency_limit',
-        running,
-        limit,
-      }
-    );
+  const width = computeWidth(cwd);
+  if (width.live >= width.cap) {
+    return result(`Error: ${widthFullMessage(width)}`, {
+      mode: 'spawn',
+      error: 'concurrency_limit',
+      running: width.live,
+      limit: width.cap,
+      limiter: width.limiter,
+    });
   }
 
   // --message-file: read mission text from a file to avoid shell interpolation

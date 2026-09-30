@@ -158,7 +158,7 @@ it('scopes budget, emergency stop, and supervision to the owning run', async () 
     (
       await invoke(
         projectA,
-        ['run', 'start', '--goal', 'Bound project A', '--max-steps', '4', '--concurrency', '1'],
+        ['run', 'start', '--goal', 'Bound project A', '--max-steps', '5', '--concurrency', '1'],
         as('Delegator')
       )
     ).stdout
@@ -167,7 +167,7 @@ it('scopes budget, emergency stop, and supervision to the owning run', async () 
     (
       await invoke(
         projectB,
-        ['run', 'start', '--goal', 'Bound project B', '--max-steps', '4', '--concurrency', '2'],
+        ['run', 'start', '--goal', 'Bound project B', '--max-steps', '10', '--concurrency', '2'],
         as('Delegator')
       )
     ).stdout
@@ -227,7 +227,7 @@ it('scopes budget, emergency stop, and supervision to the owning run', async () 
   expect(leaderA).toBeGreaterThan(1);
   childPids.push(leaderA);
   for (const output of [statusBefore, explainBefore]) {
-    expect(output).toContain('Budget: 2/4 steps remaining');
+    expect(output).toContain('Budget: 3/5 steps remaining');
     expect(output).toContain('Keep verified');
     expect(output).toContain(`PID ${leaderA}`);
     expect(output).not.toContain('PeerB');
@@ -238,10 +238,10 @@ it('scopes budget, emergency stop, and supervision to the owning run', async () 
   ).toMatchObject({
     id: runA.id,
     consumedSteps: 2,
-    maxSteps: 4,
+    maxSteps: 5,
   });
   expect((await invoke(projectB, ['status'], as('Observer'))).stdout).toContain(
-    'Budget: 4/4 steps remaining'
+    'Budget: 10/10 steps remaining'
   );
   expect(
     JSON.parse((await invoke(projectB, ['run', 'status'], as('Observer'))).stdout).consumedSteps
@@ -258,6 +258,7 @@ it('scopes budget, emergency stop, and supervision to the owning run', async () 
     JSON.parse((await invoke(projectA, ['run', 'status'], as('Delegator'))).stdout).consumedSteps
   ).toBe(2);
 
+  breakerA.recordStep('PeerA', 'bash', { cwd: projectA, sessionId: runA.id });
   breakerA.recordStep('PeerA', 'bash', { cwd: projectA, sessionId: runA.id });
   breakerA.recordStep('PeerA', 'bash', { cwd: projectA, sessionId: runA.id });
   await vi.waitFor(
@@ -277,9 +278,9 @@ it('scopes budget, emergency stop, and supervision to the owning run', async () 
 
   for (const command of ['status', 'explain'] as const) {
     const output = (await invoke(projectA, [command], as('Observer'))).stdout;
-    expect(output).toContain('Budget: 0/4 steps remaining');
+    expect(output).toContain('Budget: 0/5 steps remaining');
     expect(output).toContain(`Stopped run: ${runA.id}`);
-    expect(output).toContain('Stop reason: Global step budget exceeded (4/4 steps)');
+    expect(output).toContain('Stop reason: Global step budget exceeded (5/5 steps)');
     expect(output).toContain('Verified parser fact');
     expect(output).not.toContain(`PID ${leaderA}`);
     expect(output).not.toContain(`PID ${childA}`);
@@ -334,8 +335,8 @@ it('scopes budget, emergency stop, and supervision to the owning run', async () 
     JSON.parse((await invoke(projectA, ['run', 'show', runA.id], as('Observer'))).stdout)
   ).toMatchObject({
     status: 'aborted',
-    consumedSteps: 4,
-    stopReason: 'Global step budget exceeded (4/4 steps)',
+    consumedSteps: 5,
+    stopReason: 'Global step budget exceeded (5/5 steps)',
   });
 
   await invoke(projectA, ['--stop']);
@@ -348,11 +349,11 @@ it('scopes budget, emergency stop, and supervision to the owning run', async () 
   ).toMatchObject({
     id: runA.id,
     status: 'aborted',
-    consumedSteps: 4,
-    stopReason: 'Global step budget exceeded (4/4 steps)',
+    consumedSteps: 5,
+    stopReason: 'Global step budget exceeded (5/5 steps)',
   });
   expect((await invoke(projectA, ['status'], as('Later'))).stdout).toContain(
-    'Stop reason: Global step budget exceeded (4/4 steps)'
+    'Stop reason: Global step budget exceeded (5/5 steps)'
   );
   await expect(invoke(projectA, ['spawn', 'revived peer'], as('Later'))).rejects.toMatchObject({
     stderr: expect.stringContaining('No active Swarm Run'),

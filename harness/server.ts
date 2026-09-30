@@ -154,7 +154,6 @@ function routerConfigForCwd(cwd: string): RouterConfig {
     swarmEventsInFeed: config.swarmEventsInFeed,
     nameTheme: { theme: config.nameTheme, customWords: config.nameWords },
     feedRetention: config.feedRetention,
-    maxConcurrentSpawns: config.maxConcurrentSpawns,
   };
 }
 

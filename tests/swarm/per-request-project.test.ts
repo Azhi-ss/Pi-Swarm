@@ -62,7 +62,9 @@ describe('per-request project resolution', () => {
       const emptyProject = createProject('empty');
       const config = loadConfig(emptyProject);
 
-      expect(config.maxConcurrentSpawns).toBe(3); // default
+      expect(config.maxConcurrentSpawns).toBe(
+        Math.min(6, Math.max(1, os.availableParallelism() - 1))
+      ); // default
     });
 
     it('caches config per cwd', () => {
@@ -249,7 +251,7 @@ describe('multi-project singleton server scenario', () => {
     const projectA = createProject('projectA');
     const projectB = createProject('projectB');
 
-    // Project A: default config (maxConcurrentSpawns: 3)
+    // Project A: default config (machine-derived Host Width Cap)
     // Project B: custom config
     const piDirB = path.join(projectB, '.pi');
     fs.mkdirSync(piDirB, { recursive: true });
@@ -267,7 +269,9 @@ describe('multi-project singleton server scenario', () => {
     const configFromCaller = loadConfig(callerCwd);
 
     // Server's startup config has default
-    expect(configFromServer.maxConcurrentSpawns).toBe(3);
+    expect(configFromServer.maxConcurrentSpawns).toBe(
+      Math.min(6, Math.max(1, os.availableParallelism() - 1))
+    );
     // Caller's config has custom value
     expect(configFromCaller.maxConcurrentSpawns).toBe(10);
     // Per-request resolution uses the caller config

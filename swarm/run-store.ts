@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { activeRunId } from '../project.js';
+import { loadConfig } from '../config.js';
 
 export interface HandoffState {
   failures: number;
@@ -135,10 +136,19 @@ export function startRun(
     if (activeRunId(cwd))
       throw new Error('A Swarm Run is already active; use run join or run status.');
     if (!input.goal?.trim()) throw new Error('run start requires --goal.');
-    const maxSteps = input.maxSteps ?? 50,
-      concurrency = input.concurrency ?? 3;
-    if (![maxSteps, concurrency].every((n) => Number.isSafeInteger(n) && n > 0))
-      throw new Error('Budget and concurrency must be positive integers.');
+    // An unparsable flag arrives as null (JSON NaN) and must be rejected, not defaulted.
+    const concurrency =
+      input.concurrency === undefined
+        ? Math.min(loadConfig(cwd).maxConcurrentSpawns, 50)
+        : input.concurrency;
+    if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 50)
+      throw new Error('--concurrency must be an integer from 1 to 50.');
+    const maxSteps =
+      input.maxSteps === undefined
+        ? Math.max(50, Math.ceil((50 * concurrency) / 3))
+        : input.maxSteps;
+    if (!Number.isSafeInteger(maxSteps) || maxSteps < 1)
+      throw new Error('Budget must be a positive integer.');
     const run: SwarmRun = {
       id: randomUUID(),
       project: cwd,

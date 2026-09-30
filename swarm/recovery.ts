@@ -1,5 +1,4 @@
 import { forceKillProcessGroup } from './process-manager.js';
-import { loadConfig } from '../config.js';
 import { getCircuitBreaker } from './circuit-breaker/index.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -23,6 +22,7 @@ import { ensureSessionChannel } from '../channel.js';
 import { criticalHeader, enqueueCritical } from './notifications.js';
 import { generateAttributionBrief } from './watchdog/brief.js';
 import { acceptanceEvidence, executeRun, readyForAcceptance } from './handlers/run.js';
+import { computeWidth } from './width.js';
 
 /** A failed check reads external evidence the task log does not contain. */
 const FAILED_ACCEPTANCE_RETRY_MS = 2_000;
@@ -181,11 +181,8 @@ export function recoverRun(cwd: string): void {
         h.suspended = true;
         return;
       }
-      if (
-        listSpawned(cwd, run.id).filter(live).length >=
-        Math.min(current.concurrency, loadConfig(cwd).maxConcurrentSpawns)
-      )
-        return;
+      const width = computeWidth(cwd, current);
+      if (width.live >= width.cap) return;
       if (task.claimed_by)
         appendTaskEvent(cwd, run.id, {
           taskId: task.id,

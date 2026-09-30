@@ -44,9 +44,16 @@ function createTempCwd(): string {
 
 const roots = new Set<string>();
 
-function tempCwd(): string {
+function tempCwd(hostWidthCap?: number): string {
   const cwd = createTempCwd();
   roots.add(cwd);
+  if (hostWidthCap !== undefined) {
+    fs.mkdirSync(path.join(cwd, '.pi'));
+    fs.writeFileSync(
+      path.join(cwd, '.pi/pi-messenger.json'),
+      JSON.stringify({ maxConcurrentSpawns: hostWidthCap })
+    );
+  }
   return cwd;
 }
 
@@ -92,19 +99,12 @@ describe('spawn concurrency limit', () => {
   });
 
   it('allows spawning when under the limit', () => {
-    const cwd = tempCwd();
+    const cwd = tempCwd(3);
     const sessionId = 'concurrency-under';
     const proc = new FakeProcess();
     spawnMock.mockReturnValue(proc as any);
 
-    const result = executeSpawn(
-      null,
-      { objective: 'Test under limit' },
-      baseState,
-      cwd,
-      sessionId,
-      3 // limit
-    );
+    const result = executeSpawn(null, { objective: 'Test under limit' }, baseState, cwd, sessionId);
 
     expect(result).toBeDefined();
     const text = (result as any).content?.[0]?.text ?? '';
@@ -112,7 +112,7 @@ describe('spawn concurrency limit', () => {
   });
 
   it('rejects spawn when at the concurrency limit', () => {
-    const cwd = tempCwd();
+    const cwd = tempCwd(2);
     const sessionId = 'concurrency-at';
 
     // Spawn 2 agents to fill the limit
@@ -120,18 +120,11 @@ describe('spawn concurrency limit', () => {
     const proc2 = new FakeProcess();
     spawnMock.mockReturnValueOnce(proc1 as any).mockReturnValueOnce(proc2 as any);
 
-    executeSpawn(null, { objective: 'Agent 1' }, baseState, cwd, sessionId, 2);
-    executeSpawn(null, { objective: 'Agent 2' }, baseState, cwd, sessionId, 2);
+    executeSpawn(null, { objective: 'Agent 1' }, baseState, cwd, sessionId);
+    executeSpawn(null, { objective: 'Agent 2' }, baseState, cwd, sessionId);
 
     // Third spawn should be rejected
-    const result = executeSpawn(
-      null,
-      { objective: 'Agent 3' },
-      baseState,
-      cwd,
-      sessionId,
-      2 // limit
-    );
+    const result = executeSpawn(null, { objective: 'Agent 3' }, baseState, cwd, sessionId);
 
     expect(result).toBeDefined();
     const details = (result as any).details ?? {};
@@ -143,15 +136,15 @@ describe('spawn concurrency limit', () => {
   });
 
   it('allows spawn after an agent completes', () => {
-    const cwd = tempCwd();
+    const cwd = tempCwd(2);
     const sessionId = 'concurrency-complete';
 
     const proc1 = new FakeProcess();
     const proc2 = new FakeProcess();
     spawnMock.mockReturnValueOnce(proc1 as any).mockReturnValueOnce(proc2 as any);
 
-    executeSpawn(null, { objective: 'Agent 1' }, baseState, cwd, sessionId, 2);
-    executeSpawn(null, { objective: 'Agent 2' }, baseState, cwd, sessionId, 2);
+    executeSpawn(null, { objective: 'Agent 1' }, baseState, cwd, sessionId);
+    executeSpawn(null, { objective: 'Agent 2' }, baseState, cwd, sessionId);
 
     // Complete agent 1
     proc1.exitCode = 0;
@@ -161,54 +154,45 @@ describe('spawn concurrency limit', () => {
     const proc3 = new FakeProcess();
     spawnMock.mockReturnValueOnce(proc3 as any);
 
-    const result = executeSpawn(null, { objective: 'Agent 3' }, baseState, cwd, sessionId, 2);
+    const result = executeSpawn(null, { objective: 'Agent 3' }, baseState, cwd, sessionId);
 
     expect(result).toBeDefined();
     const text = (result as any).content?.[0]?.text ?? '';
     expect(text).toContain('🚀 Spawned');
   });
 
-  it('uses default limit of 3 when maxConcurrentSpawns is not provided', () => {
+  it('uses the machine-derived Host Width Cap when maxConcurrentSpawns is not configured', () => {
     const cwd = tempCwd();
     const sessionId = 'concurrency-default';
+    const hostDefault = Math.min(6, Math.max(1, os.availableParallelism() - 1));
 
-    // Spawn 3 agents to fill default limit
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < hostDefault; i++) {
       const proc = new FakeProcess();
       spawnMock.mockReturnValueOnce(proc as any);
       executeSpawn(null, { objective: `Agent ${i}` }, baseState, cwd, sessionId);
     }
 
-    // Fourth should be rejected
-    const result = executeSpawn(
-      null,
-      { objective: 'Agent 4' },
-      baseState,
-      cwd,
-      sessionId
-      // no maxConcurrentSpawns — uses default of 3
-    );
+    const result = executeSpawn(null, { objective: 'One more' }, baseState, cwd, sessionId);
 
     expect(result).toBeDefined();
     const details = (result as any).details ?? {};
     expect(details.error).toBe('concurrency_limit');
-    expect(details.limit).toBe(3);
-    const text = (result as any).content?.[0]?.text ?? '';
-    expect(text).toContain('3 subagents already running');
+    expect(details.limit).toBe(hostDefault);
+    expect(details.limiter).toBe('host-cap');
   });
 
   it('respects a custom limit of 1', () => {
-    const cwd = tempCwd();
+    const cwd = tempCwd(1);
     const sessionId = 'concurrency-1';
 
     const proc = new FakeProcess();
     spawnMock.mockReturnValue(proc as any);
 
     // First spawn succeeds
-    executeSpawn(null, { objective: 'Only one' }, baseState, cwd, sessionId, 1);
+    executeSpawn(null, { objective: 'Only one' }, baseState, cwd, sessionId);
 
     // Second spawn is rejected
-    const result = executeSpawn(null, { objective: 'Too many' }, baseState, cwd, sessionId, 1);
+    const result = executeSpawn(null, { objective: 'Too many' }, baseState, cwd, sessionId);
 
     expect(result).toBeDefined();
     const details = (result as any).details ?? {};
@@ -222,7 +206,7 @@ describe('spawn concurrency limit', () => {
     const cwd = tempCwd();
     const sessionId = 'concurrency-list';
 
-    const result = executeSpawn('list', {}, baseState, cwd, sessionId, 1);
+    const result = executeSpawn('list', {}, baseState, cwd, sessionId);
 
     // list returns normally (no agents) — doesn't hit concurrency check
     expect(result).toBeDefined();
