@@ -59,6 +59,25 @@ export function resolveProject(start: string): string {
   }
 }
 
+/** A peer cwd belongs to this Project when it is the Project root or one of its Sandboxes. */
+export function peerBelongsToProject(project: string, peerCwd: string): boolean {
+  const canonical = (dir: string) => {
+    try {
+      return fs.realpathSync.native(dir);
+    } catch {
+      return path.resolve(dir);
+    }
+  };
+  const location = path.relative(canonical(project), canonical(peerCwd));
+  return (
+    location === '' ||
+    (location !== '' &&
+      !location.startsWith(`..${path.sep}`) &&
+      location !== '..' &&
+      location.startsWith(`.swarm${path.sep}workspaces${path.sep}`))
+  );
+}
+
 export function activeRunId(cwd: string): string | undefined {
   try {
     return JSON.parse(fs.readFileSync(path.join(cwd, '.pi/messenger/active-run.json'), 'utf8')).id;

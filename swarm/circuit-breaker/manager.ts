@@ -2,7 +2,7 @@ import { forceKillProcessGroup } from '../process-manager.js';
 import { activeRunId } from '../../project.js';
 import { readRun, updateRun, endRun } from '../run-store.js';
 import type { BudgetConfig, BudgetStatus } from './types.js';
-import { forceKillAllSpawned } from '../spawn.js';
+import { forceKillAllSpawned, stopOwnedRun } from '../spawn.js';
 import { listActiveWorktrees, removeWorktree, pruneWorktrees } from '../worktree/index.js';
 import { logFeedEvent } from '../../feed/index.js';
 import { appendTaskEvent } from '../task-store/events.js';
@@ -70,6 +70,7 @@ export class CircuitBreakerManager {
       this.consumedSteps = run.consumedSteps;
       this.maxSteps = run.maxSteps;
       this.tripped = run.status !== 'active' || run.consumedSteps >= run.maxSteps;
+      if (run.stopReason) this.trippedReason = run.stopReason;
     }
     return {
       consumedSteps: this.consumedSteps,
@@ -116,6 +117,7 @@ export class CircuitBreakerManager {
     if (this.scope)
       updateRun(cwd, this.scope.runId, (run) => {
         run.status = 'aborted';
+        if (!run.stopReason) run.stopReason = finalReason;
         if (run.acceptancePid) forceKillProcessGroup(run.acceptancePid);
         delete run.acceptancePid;
       });
@@ -149,12 +151,23 @@ export class CircuitBreakerManager {
       });
     } catch {}
 
-    // 3. Batch terminate all worker processes
+    // Persist the locked projection before killing peers. A peer that trips its own
+    // budget dies with the process group and must not skip the terminal record.
+    try {
+      writeBlackboard(cwd, snapshotSessionId);
+    } catch {}
+    if (this.scope) {
+      endRun(cwd, this.scope.runId, 'aborted');
+      try {
+        stopOwnedRun(cwd, this.scope.runId);
+      } catch {}
+      return;
+    }
+
+    // Legacy session abort, before an explicit Swarm Run exists.
     try {
       forceKillAllSpawned(cwd);
     } catch {}
-
-    // 4. Coordinate sandbox worktree cleanup
     try {
       const active = listActiveWorktrees();
       for (const wt of active) {
@@ -165,12 +178,6 @@ export class CircuitBreakerManager {
       }
       pruneWorktrees(cwd);
     } catch {}
-
-    // 5. Update BLACKBOARD.md header with tripped banner
-    try {
-      writeBlackboard(cwd, snapshotSessionId);
-    } catch {}
-    if (this.scope) endRun(cwd, this.scope.runId, 'aborted');
   }
 
   public reset(): void {

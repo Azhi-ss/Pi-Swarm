@@ -92,8 +92,10 @@ export function generateBlackboard(cwd: string, sessionId: string): string {
   );
   const budget = getCircuitBreaker(cwd, sessionId).getStatus();
   if (budget.isTripped) {
+    const reason =
+      budget.trippedReason || `${budget.consumedSteps}/${budget.maxSteps} steps exceeded`;
     lines.push(
-      `> 🛑 **CIRCUIT BREAKER TRIPPED**: ${budget.consumedSteps}/${budget.maxSteps} steps exceeded | Blackboard LOCKED | Swarm Aborted`
+      `> 🛑 **CIRCUIT BREAKER TRIPPED**: ${reason} | Budget: ${budget.remainingSteps}/${budget.maxSteps} steps remaining | Blackboard LOCKED | Swarm Aborted`
     );
   } else {
     lines.push(

@@ -1,7 +1,7 @@
 import { loadConfig } from '../config.js';
 import { preserveCandidate } from './candidates.js';
 import { readRun } from './run-store.js';
-import { messengerDirs, activeRunId } from '../project.js';
+import { messengerDirs, activeRunId, peerBelongsToProject } from '../project.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { tmpdir } from 'node:os';
@@ -631,6 +631,7 @@ export function spawnSubagent(
       status: 'running',
       timeoutMs: 600_000,
       deferTimeoutCleanup: !!run,
+      runId: sessionId,
     },
     proc,
     () => {
@@ -779,6 +780,55 @@ export function stopSpawn(cwd: string, id: string, recoverable = false): boolean
   }, 4000).unref();
 
   return true;
+}
+
+/** Kill and reclaim only this run's peer process groups and Sandboxes. */
+export function stopOwnedRun(cwd: string, runId: string): void {
+  const peers = listSpawned(cwd, runId, true);
+  const ids = new Set(peers.map((peer) => peer.id));
+  const kill = (pid?: number) => {
+    if (!pid || pid <= 0 || pid === process.pid) return;
+    forceKillProcessGroup(pid);
+  };
+  for (const peer of peers) if (peer.status === 'running') kill(peer.pid);
+  for (const runtime of runtimes.values()) {
+    if (runtime.record.sessionId !== runId || runtime.record.status !== 'running') continue;
+    if (!peerBelongsToProject(cwd, runtime.record.cwd)) continue;
+    runtime.stopping = true;
+    ids.add(runtime.record.id);
+    kill(runtime.record.pid);
+    if (!runtime.detached && runtime.process.exitCode === null) {
+      try {
+        runtime.process.kill('SIGKILL');
+      } catch {
+        /* already dead */
+      }
+    }
+  }
+  for (const worker of processManager.list()) {
+    if (!peerBelongsToProject(cwd, worker.cwd)) continue;
+    if (worker.runId && worker.runId !== runId) continue;
+    if (!worker.runId && !ids.has(worker.id)) continue;
+    kill(worker.pid);
+    try {
+      processManager.kill(worker.id, 'SIGKILL');
+    } catch {
+      /* already removed */
+    }
+  }
+  for (const id of ids) {
+    try {
+      removeWorktree(cwd, id);
+    } catch {
+      /* already removed */
+    }
+  }
+  try {
+    pruneWorktrees(cwd);
+  } catch {
+    /* best effort */
+  }
+  if (peers.some((peer) => peer.pid === process.pid)) forceKillProcessGroup(process.pid);
 }
 
 export function stopAllSpawned(cwd?: string): void {

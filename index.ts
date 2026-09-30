@@ -581,11 +581,11 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
       cwd,
       sessionId,
     });
-    if (breaker.isTripped()) {
+    const budget = breaker.getStatus();
+    if (budget.isTripped) {
       return {
         block: true,
-        reason:
-          '🛑 CIRCUIT BREAKER TRIPPED: Global step budget exceeded (50 steps max). All tool executions halted.',
+        reason: `🛑 CIRCUIT BREAKER TRIPPED: ${budget.trippedReason || 'Run budget exhausted'} (${budget.consumedSteps}/${budget.maxSteps} steps). Remaining budget: ${budget.remainingSteps}. All tool executions halted.`,
       };
     }
     return handleReservationEnforcement(event, ctx, state, dirs);

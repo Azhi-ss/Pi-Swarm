@@ -1,4 +1,4 @@
-import { messengerDirs } from '../../project.js';
+import { messengerDirs, peerBelongsToProject } from '../../project.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { SwarmTask } from '../types.js';
@@ -15,20 +15,24 @@ import { loadSpawnedAgents } from '../spawn.js';
  * Check if the claiming worker process for a task is confirmed dead.
  */
 function isWorkerDead(cwd: string, sessionId: string, claimant: string): boolean {
-  // 1. Check local ProcessManager
-  const managed = processManager.get(claimant);
-  if (managed) {
-    if (
-      managed.status === 'failed' ||
-      managed.status === 'timeout' ||
-      managed.status === 'stopped'
-    ) {
-      return true;
-    }
-    if (managed.pid && !isProcessAlive(managed.pid)) {
-      return true;
-    }
-    return false;
+  // Only this Project and run count. A live peer in another Project must not keep the lease.
+  const local = processManager.list(true).filter((worker) => {
+    if (!peerBelongsToProject(cwd, worker.cwd)) return false;
+    if (worker.runId && worker.runId !== sessionId) return false;
+    return (
+      worker.agentName === claimant ||
+      worker.id === claimant ||
+      worker.name === claimant ||
+      worker.name === `[Swarm] worker-${claimant}`
+    );
+  });
+  if (local.length) {
+    return local.every((worker) => {
+      if (worker.status === 'failed' || worker.status === 'timeout' || worker.status === 'stopped')
+        return true;
+      if (worker.pid && !isProcessAlive(worker.pid)) return true;
+      return false;
+    });
   }
 
   // 2. Check spawned agent event logs

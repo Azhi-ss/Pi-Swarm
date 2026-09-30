@@ -1,7 +1,9 @@
 import type { SwarmTask } from '../types.js';
 import type { AllDeadStatus, SteerSender } from './types.js';
+import { isProcessAlive } from '../../lib.js';
+import { peerBelongsToProject } from '../../project.js';
 import { replayTasks } from '../task-store/events.js';
-import { getRunningSpawnCount } from '../spawn.js';
+import { listSpawned } from '../spawn.js';
 import { processManager } from '../process-manager.js';
 import { generateAttributionBrief } from './brief.js';
 import { logFeedEvent } from '../../feed/index.js';
@@ -50,11 +52,21 @@ export function resetFallbackLatch(sessionId?: string, taskId?: string): void {
  * Check if all hypotheses under a task or across the session have failed (dead_end)
  * and no active workers or todo tasks remain.
  */
+function runningPeerCount(cwd: string, sessionId: string): number {
+  const spawned = listSpawned(cwd, sessionId).filter(
+    (peer) => peer.status === 'running' && !!peer.pid && isProcessAlive(peer.pid)
+  ).length;
+  const managed = processManager.list().filter((peer) => {
+    if (!peerBelongsToProject(cwd, peer.cwd)) return false;
+    if (peer.runId && peer.runId !== sessionId) return false;
+    return true;
+  }).length;
+  return Math.max(spawned, managed);
+}
+
 export function checkAllDead(cwd: string, sessionId: string, targetTaskId?: string): AllDeadStatus {
   const allTasks = replayTasks(cwd, sessionId);
-  const runningSpawn = getRunningSpawnCount(cwd);
-  const runningManaged = processManager.list().filter((p) => p.cwd === cwd).length;
-  const runningWorkerCount = Math.max(runningSpawn, runningManaged);
+  const runningWorkerCount = runningPeerCount(cwd, sessionId);
 
   if (targetTaskId) {
     const task = allTasks.find((t) => t.id === targetTaskId);

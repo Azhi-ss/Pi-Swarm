@@ -15,6 +15,8 @@ export interface ManagedWorkerProcess {
   status: 'running' | 'completed' | 'failed' | 'timeout' | 'stopped';
   timeoutMs: number;
   deferTimeoutCleanup?: boolean;
+  /** Owning Swarm Run, when this process was admitted by one. */
+  runId?: string;
   error?: string;
 }
 

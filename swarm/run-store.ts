@@ -23,6 +23,7 @@ export interface SwarmRun {
   maxSteps: number;
   consumedSteps: number;
   concurrency: number;
+  stopReason?: string;
   acceptanceCommand?: string;
   acceptanceOwner?: number;
   acceptancePid?: number;
@@ -43,6 +44,30 @@ const runPath = (cwd: string, id: string) => {
 export function readRun(cwd: string, id = activeRunId(cwd)): SwarmRun | undefined {
   if (!id) return;
   return JSON.parse(fs.readFileSync(runPath(cwd, id), 'utf8'));
+}
+export function readRunIfPresent(cwd: string, id?: string): SwarmRun | undefined {
+  try {
+    return readRun(cwd, id);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    if (error instanceof Error && error.message === 'Invalid run ID') return;
+    throw error;
+  }
+}
+/** Active run, otherwise the most recently ended run still on disk. */
+export function readMostRecentRun(cwd: string): SwarmRun | undefined {
+  const active = readRunIfPresent(cwd);
+  if (active) return active;
+  const history = path.join(root(cwd), 'run-history');
+  if (!fs.existsSync(history)) return;
+  const runs: SwarmRun[] = [];
+  for (const file of fs.readdirSync(history)) {
+    if (!file.endsWith('.json')) continue;
+    const run = readRunIfPresent(cwd, file.slice(0, -5));
+    if (run) runs.push(run);
+  }
+  runs.sort((a, b) => (b.endedAt ?? b.startedAt).localeCompare(a.endedAt ?? a.startedAt));
+  return runs[0];
 }
 function atomicWrite(file: string, value: unknown) {
   fs.mkdirSync(path.dirname(file), { recursive: true });

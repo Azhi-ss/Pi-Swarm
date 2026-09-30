@@ -1,4 +1,4 @@
-import { readRun, updateRun } from './swarm/run-store.js';
+import { readRun, readRunIfPresent, updateRun } from './swarm/run-store.js';
 import { listCandidates, restoreCandidate } from './swarm/candidates.js';
 import { listSpawned, stopSpawn } from './swarm/spawn.js';
 import { getTask } from './swarm/task-store.js';
@@ -51,6 +51,7 @@ export async function executeAction(
   const cwd = ctx.cwd ?? process.cwd();
   const sessionId = getEffectiveSessionId(cwd, state);
   const run = readRun(cwd);
+  const addressed = readRunIfPresent(cwd, sessionId);
   const readOnly = [
     'status',
     'explain',
@@ -74,10 +75,10 @@ export async function executeAction(
     'blackboard',
   ];
   if (
-    run &&
-    getCircuitBreaker(cwd, run.id).isTripped() &&
+    ((run && getCircuitBreaker(cwd, run.id).isTripped()) ||
+      (addressed && addressed.status !== 'active')) &&
     !readOnly.includes(action) &&
-    !['abort', 'swarm.abort'].includes(action)
+    !['abort', 'swarm.abort', 'run.start'].includes(action)
   )
     throw new Error('Swarm Run is stopped or its budget is exhausted.');
 
@@ -136,7 +137,7 @@ export async function executeAction(
         : executeObserverStatus(cwd, sessionId, state, dirs);
 
     case 'explain':
-      return executeObserverExplain(cwd);
+      return executeObserverExplain(cwd, sessionId, state, dirs);
 
     case 'abort': {
       const reason = params.reason || 'Manual abort requested';

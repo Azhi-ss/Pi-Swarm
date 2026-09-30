@@ -138,6 +138,44 @@ describe('Module 5 R2: Stale Lease Reclamation & Blackboard Sync', () => {
     expect(updated?.claimed_by).toBeUndefined();
   });
 
+  it('reclaims a dead local claimant even when another project has a live peer of the same name', () => {
+    const task = taskStore.createTask(
+      cwd,
+      sessionId,
+      { title: 'Owned by this run', content: 'Foreign liveness must not count' },
+      'dev'
+    );
+    taskStore.stakeTask(cwd, sessionId, task.id, 'shared-name', { ttl: 300 });
+    const other = createTempDir('stale-lease-other-');
+    processManager.register({
+      id: 'foreign-live',
+      name: '[Swarm] worker-foreign-live',
+      agentName: 'shared-name',
+      pid: process.pid,
+      cwd: other,
+      runId: 'other-run',
+      startedAt: new Date().toISOString(),
+      status: 'running',
+      timeoutMs: 600_000,
+    });
+    processManager.register({
+      id: 'local-dead',
+      name: '[Swarm] worker-local-dead',
+      agentName: 'shared-name',
+      pid: 99999999,
+      cwd,
+      runId: sessionId,
+      startedAt: new Date().toISOString(),
+      status: 'stopped',
+      timeoutMs: 600_000,
+    });
+
+    const result = inspectAndReclaimStaleLeases(cwd, sessionId, Date.now());
+    expect(result.reclaimedCount).toBe(1);
+    expect(taskStore.getTask(cwd, sessionId, task.id)?.status).toBe('todo');
+    fs.rmSync(other, { recursive: true, force: true });
+  });
+
   it('preserves active tasks claimed by living workers with unexpired leases', () => {
     const task = taskStore.createTask(
       cwd,

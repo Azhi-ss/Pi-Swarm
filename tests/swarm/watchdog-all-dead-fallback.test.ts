@@ -72,6 +72,44 @@ describe('Module 5 R3: All-Dead Fallback Protocol & Attribution Brief', () => {
     expect(statusTarget.isAllDead).toBe(true);
   });
 
+  it('ignores live processes that belong to another project or another run', () => {
+    const task = taskStore.createTask(cwd, sessionId, { title: 'Local dead end' }, 'dev');
+    appendTaskEvent(cwd, sessionId, {
+      taskId: task.id,
+      type: 'dead_end',
+      timestamp: new Date().toISOString(),
+      agent: 'worker-1',
+      payload: { reason: 'Failed', attempts: 3 },
+    });
+    const other = createTempDir('all-dead-other-');
+    processManager.register({
+      id: 'foreign-project',
+      name: '[Swarm] worker-foreign-project',
+      agentName: 'foreign-peer',
+      pid: process.pid,
+      cwd: other,
+      startedAt: new Date().toISOString(),
+      status: 'running',
+      timeoutMs: 600_000,
+    });
+    processManager.register({
+      id: 'other-run',
+      name: '[Swarm] worker-other-run',
+      agentName: 'other-run-peer',
+      pid: process.pid,
+      cwd,
+      runId: 'run-elsewhere',
+      startedAt: new Date().toISOString(),
+      status: 'running',
+      timeoutMs: 600_000,
+    });
+
+    const status = checkAllDead(cwd, sessionId);
+    expect(status.isAllDead).toBe(true);
+    expect(status.runningWorkerCount).toBe(0);
+    fs.rmSync(other, { recursive: true, force: true });
+  });
+
   it('does NOT trigger all-dead if workers are still actively running or open todo tasks exist', () => {
     const task1 = taskStore.createTask(cwd, sessionId, { title: 'Dead task' }, 'dev');
     appendTaskEvent(cwd, sessionId, {
