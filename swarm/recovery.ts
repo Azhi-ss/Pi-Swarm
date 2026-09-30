@@ -7,6 +7,7 @@ import { execFileSync } from 'node:child_process';
 import { readRun, updateRun, endRun, type HandoffState } from './run-store.js';
 import { listSpawned, spawnSubagent, reconcileSpawnedAgents, stopSpawn } from './spawn.js';
 import { replayTasks, appendTaskEvent } from './task-store/events.js';
+import { getAllTasks } from './task-store/queries.js';
 import { writeBlackboard } from './task-store/blackboard.js';
 import { preserveCandidate, listCandidates } from './candidates.js';
 import { removeWorktree } from './worktree/index.js';
@@ -15,7 +16,10 @@ import { messengerDirs } from '../project.js';
 import { ensureSessionChannel } from '../channel.js';
 import { enqueueCritical } from './notifications.js';
 import { generateAttributionBrief } from './watchdog/brief.js';
-import { executeRun, readyForAcceptance } from './handlers/run.js';
+import { acceptanceEvidence, executeRun, readyForAcceptance } from './handlers/run.js';
+
+/** A failed check reads external evidence the task log does not contain. */
+const FAILED_ACCEPTANCE_RETRY_MS = 2_000;
 
 function notify(cwd: string, runId: string, to: string, id: string, text: string, taskId?: string) {
   enqueueCritical(
@@ -223,17 +227,27 @@ export function recoverRun(cwd: string): void {
     );
   }
   writeBlackboard(cwd, run.id);
+  const current = readRun(cwd, run.id);
   if (
+    current?.status === 'active' &&
     !remaining.length &&
-    run.acceptanceCommand &&
-    readyForAcceptance(tasks) &&
-    (!run.acceptanceOwner || !isProcessAlive(run.acceptanceOwner))
+    current.acceptanceCommand &&
+    (!current.acceptanceOwner || !isProcessAlive(current.acceptanceOwner))
   ) {
-    const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).trim();
-    if (run.acceptance?.head !== head) {
-      void executeRun(cwd, run.delegator, 'accept', {}).catch(() => {
-        /* Evidence is persisted; remains visibly incomplete. */
-      });
+    const acceptanceTasks = getAllTasks(cwd, current.id);
+    if (readyForAcceptance(acceptanceTasks)) {
+      const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).trim();
+      const snapshot = acceptanceEvidence(cwd, current.id, head);
+      const previous = current.acceptance;
+      const sameSnapshot = previous?.snapshot === snapshot;
+      const retryFailure =
+        sameSnapshot &&
+        previous.exitCode !== 0 &&
+        Date.now() - Date.parse(previous.checkedAt) >= FAILED_ACCEPTANCE_RETRY_MS;
+      if (!sameSnapshot || retryFailure)
+        void executeRun(cwd, current.delegator, 'accept', {}).catch(() => {
+          /* Evidence is persisted; remains visibly incomplete. */
+        });
     }
   }
 }

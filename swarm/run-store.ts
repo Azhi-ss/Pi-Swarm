@@ -33,6 +33,8 @@ export interface SwarmRun {
     output: string;
     checkedAt: string;
     head: string;
+    /** SHA-256 of HEAD and the task log. An identical snapshot is not checked again. */
+    snapshot?: string;
   };
   handoffs: Record<string, HandoffState>;
 }
@@ -171,6 +173,14 @@ export function endRun(
 ): void {
   withRunLock(cwd, () => {
     const run = readRun(cwd, id)!;
+    const release = () => {
+      if (activeRunId(cwd) === id) fs.unlinkSync(path.join(root(cwd), 'active-run.json'));
+    };
+    // A duplicate completion must not rewrite an archived board with a later run's snapshot.
+    if (run.status === status && run.endedAt) {
+      release();
+      return;
+    }
     if (run.status !== 'active' && run.status !== status) {
       if (validate) throw new Error('Run stopped during overall acceptance.');
       return;
@@ -182,6 +192,6 @@ export function endRun(
     const snapshot = path.join(cwd, 'BLACKBOARD.md');
     if (fs.existsSync(snapshot))
       fs.copyFileSync(snapshot, runPath(cwd, id).replace(/\.json$/, '.md'));
-    if (activeRunId(cwd) === id) fs.unlinkSync(path.join(root(cwd), 'active-run.json'));
+    release();
   });
 }

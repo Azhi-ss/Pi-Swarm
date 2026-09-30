@@ -515,11 +515,11 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
       const projectCwd = resolveProjectContext({ cwd: callerCwd });
       rememberProject(projectCwd);
       const runId = activeRunId(projectCwd);
-      if (!runId && (action === 'task.create' || action === 'spawn'))
-        throw new Error('No active Swarm Run; use run start --goal before creating work.');
       const requestedRun = header(req, 'x-run-id');
       if (requestedRun && requestedRun !== runId)
         throw new Error('Stale run context: the selected run is no longer active.');
+      if (!runId && (action === 'task.create' || action === 'spawn'))
+        throw new Error('No active Swarm Run; use run start --goal before creating work.');
       const storage = header(req, 'x-storage-root');
       if (storage) selectStorage(projectCwd, storage);
       // Re-resolve with project-specific dirs and config

@@ -1,9 +1,11 @@
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import * as fs from 'node:fs';
 import { isProcessAlive } from '../../lib.js';
 import type { SwarmTask } from '../types.js';
 import { readRun, startRun, updateRun, endRun } from '../run-store.js';
 import { listSpawned } from '../spawn.js';
-import { getAllTasks, writeBlackboard } from '../task-store.js';
+import { getAllTasks, getTasksJsonlPath, writeBlackboard } from '../task-store.js';
 import { forceKillProcessGroup } from '../process-manager.js';
 import { result } from '../result.js';
 import type { MessengerActionParams } from '../../action-types.js';
@@ -56,6 +58,7 @@ export async function executeRun(
     if (listSpawned(cwd, run.id).length)
       throw new Error('Overall Goal Acceptance waits for live peers to exit.');
     const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).trim();
+    const snapshot = acceptanceEvidence(cwd, run.id, head);
     let evaluator: ChildProcess | undefined;
     try {
       const checked = await new Promise<{ exitCode: number; output: string }>((resolve, reject) => {
@@ -102,7 +105,15 @@ export async function executeRun(
         });
       });
       const observed = updateRun(cwd, run.id, (current) => {
-        current.acceptance = { command, ...checked, checkedAt: new Date().toISOString(), head };
+        if (current.status !== 'active') return;
+        current.acceptance = {
+          command,
+          exitCode: checked.exitCode,
+          output: checked.output,
+          checkedAt: new Date().toISOString(),
+          head,
+          snapshot,
+        };
         delete current.acceptancePid;
       });
       if (observed.status !== 'active') throw new Error('Run stopped during overall acceptance.');
@@ -111,22 +122,31 @@ export async function executeRun(
           `Overall Goal Acceptance failed (exit ${checked.exitCode}): ${checked.output}`
         );
       endRun(cwd, run.id, 'completed', () => {
-        if (
-          execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).trim() !== head ||
-          JSON.stringify(getAllTasks(cwd, run.id)) !== JSON.stringify(tasks)
-        )
+        const nowHead = execFileSync('git', ['rev-parse', 'HEAD'], {
+          cwd,
+          encoding: 'utf8',
+        }).trim();
+        if (acceptanceEvidence(cwd, run.id, nowHead) !== snapshot)
           throw new Error('Project changed during overall acceptance; reverify.');
       });
     } finally {
-      if (evaluator)
+      if (evaluator?.pid)
         updateRun(cwd, run.id, (current) => {
+          if (current.acceptanceOwner !== process.pid) return;
           delete current.acceptanceOwner;
-          delete current.acceptancePid;
+          if (current.acceptancePid === evaluator?.pid) delete current.acceptancePid;
         });
     }
     return result(JSON.stringify(readRun(cwd, run.id)), { mode: 'run.accept' });
   }
   throw new Error(`Unknown run operation: ${operation}`);
+}
+
+/** Identity of the HEAD and task log examined by one acceptance attempt. */
+export function acceptanceEvidence(cwd: string, runId: string, head: string): string {
+  const file = getTasksJsonlPath(cwd, runId);
+  const body = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+  return createHash('sha256').update(`${head}\0${body}`).digest('hex');
 }
 
 /** Pruned alternatives are terminal, not failed prerequisites for another solution. */
