@@ -1405,3 +1405,375 @@ it('does not deliver a critical incident to the same peer name in another projec
     await new Promise<void>((resolve) => provider.close(() => resolve()));
   }
 }, 60_000);
+
+function writeToolTurn(res: import('node:http').ServerResponse, id: string, shell: string) {
+  res.writeHead(200, { 'content-type': 'text/event-stream' });
+  const delta = {
+    role: 'assistant',
+    tool_calls: [
+      {
+        index: 0,
+        id,
+        type: 'function',
+        function: { name: 'bash', arguments: JSON.stringify({ command: shell, timeout: 60 }) },
+      },
+    ],
+  };
+  for (const choice of [
+    { delta, finish_reason: null },
+    { delta: {}, finish_reason: 'tool_calls' as const },
+  ])
+    res.write(
+      'data: ' +
+        JSON.stringify({
+          id: 'candidate',
+          object: 'chat.completion.chunk',
+          created: 1,
+          model: 'fixture',
+          choices: [{ index: 0, ...choice }],
+        }) +
+        '\n\n'
+    );
+  res.end('data: [DONE]\n\n');
+}
+
+function useFixture(port: number) {
+  fs.mkdirSync(env.PI_CODING_AGENT_DIR!, { recursive: true });
+  fs.writeFileSync(
+    path.join(env.PI_CODING_AGENT_DIR!, 'models.json'),
+    JSON.stringify({
+      providers: {
+        fixture: {
+          baseUrl: `http://127.0.0.1:${port}/v1`,
+          api: 'openai-completions',
+          apiKey: 'fixture',
+          models: [{ id: 'fixture', contextWindow: 128000, maxTokens: 2048 }],
+        },
+      },
+    })
+  );
+}
+
+it('preserves an unverified candidate and lets an explicit successor restore and reverify it', async () => {
+  await command('abort').catch(() => {});
+  await run('git', ['config', 'user.name', 'Test']);
+  await run('git', ['config', 'user.email', 'test@example.test']);
+  fs.mkdirSync(path.join(project, 'node_modules'), { recursive: true });
+  fs.writeFileSync(path.join(project, 'node_modules', 'keep.txt'), 'host dependency\n');
+  fs.writeFileSync(path.join(project, 'handoff-tracked.txt'), 'original\n');
+  await run('git', ['add', 'handoff-tracked.txt']);
+  await run('git', ['commit', '-m', 'handoff baseline']);
+  let turns = 0;
+  const provider = createHttpServer(async (req, res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    const shell = raw.includes('selective restore')
+      ? 'pi-messenger-swarm run join && for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do pi-messenger-swarm task claim task-1 && break; sleep 1; done && pi-messenger-swarm candidate show latest --task task-1 && pi-messenger-swarm candidate restore latest --task task-1 --include handoff-created.ts && echo RESTORED_SELECTED && sleep 40'
+      : "printf 'changed\\n' > handoff-tracked.txt && printf 'export const created = true;\\n' > handoff-created.ts && sleep 1 && kill -KILL \"$PI_SWARM_PEER_PID\"";
+    writeToolTurn(res, `edit_${++turns}`, shell);
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  const started = JSON.parse(
+    (await command('run', 'start', '--goal', 'Preserve a handoff candidate', '--max-steps', '20'))
+      .stdout
+  );
+  await command('run', 'join');
+  await command('task', 'create', '--title', 'Unfinished source');
+  await command('task', 'claim', 'task-1');
+  const beta = path.join(root, 'beta-candidate');
+  fs.mkdirSync(beta);
+  await run('git', ['init'], beta);
+  await run(
+    'git',
+    [
+      '-c',
+      'user.email=test@example.test',
+      '-c',
+      'user.name=Test',
+      'commit',
+      '--allow-empty',
+      '-m',
+      'init',
+    ],
+    beta
+  );
+  const betaCmd = (...args: string[]) =>
+    exec(process.execPath, [cli, ...args], { cwd: beta, env, timeout: 20_000 });
+  const successor = (...args: string[]) =>
+    exec(process.execPath, [cli, ...args], {
+      cwd: project,
+      env: { ...env, PI_AGENT_NAME: 'Successor' },
+      timeout: 20_000,
+    });
+  try {
+    await betaCmd('run', 'start', '--goal', 'Other project candidates');
+    await betaCmd('run', 'join');
+    await command(
+      'spawn',
+      '--task-id',
+      'task-1',
+      '--name',
+      'Editor',
+      '--model',
+      'fixture/fixture',
+      'leave a candidate'
+    );
+    const editorId = (await command('spawn', 'list')).stdout.match(/^- (\w+): Editor /m)?.[1];
+    expect(editorId).toBeTruthy();
+    const editorSandbox = path.join(project, '.swarm', 'workspaces', `worker-${editorId}`);
+    await vi.waitFor(
+      async () => {
+        const listed = JSON.parse((await command('candidate', 'list', '--task', 'task-1')).stdout);
+        expect(listed[0]).toMatchObject({
+          project,
+          runId: started.id,
+          taskId: 'task-1',
+          peer: 'Editor',
+          status: 'unverified',
+        });
+      },
+      { timeout: 15_000 }
+    );
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    expect((await command('spawn', 'list')).stdout).toContain('No spawned agents');
+    expect(fs.existsSync(editorSandbox)).toBe(false);
+    const shown = (await command('candidate', 'show', 'latest', '--task', 'task-1')).stdout;
+    expect(shown).toContain('"status":"unverified"');
+    expect(shown).toContain('handoff-tracked.txt');
+    expect(shown).toContain('handoff-created.ts');
+    expect(fs.readFileSync(path.join(project, 'handoff-tracked.txt'), 'utf8')).toBe('original\n');
+    expect(fs.existsSync(path.join(project, 'handoff-created.ts'))).toBe(false);
+    expect(fs.readFileSync(path.join(project, 'node_modules', 'keep.txt'), 'utf8')).toBe(
+      'host dependency\n'
+    );
+    expect((await command('task', 'show', 'task-1')).stdout).toContain('Verification attempts: 0');
+    expect(JSON.parse((await betaCmd('candidate', 'list')).stdout)).toEqual([]);
+
+    await command(
+      'spawn',
+      '--task-id',
+      'task-1',
+      '--name',
+      'Successor',
+      '--model',
+      'fixture/fixture',
+      'selective restore'
+    );
+    await command('task', 'unclaim', 'task-1');
+    const successorId = (await command('spawn', 'list')).stdout.match(/^- (\w+): Successor /m)?.[1];
+    expect(successorId, (await command('spawn', 'list')).stdout).toBeTruthy();
+    const sandbox = path.join(project, '.swarm', 'workspaces', `worker-${successorId}`);
+    await vi.waitFor(
+      async () =>
+        expect((await command('ps', 'logs', successorId!)).stdout).toContain(
+          'Candidate restored as UNVERIFIED'
+        ),
+      { timeout: 25_000 }
+    );
+    expect(fs.readFileSync(path.join(sandbox, 'handoff-created.ts'), 'utf8')).toContain(
+      'export const created'
+    );
+    expect(fs.readFileSync(path.join(sandbox, 'handoff-tracked.txt'), 'utf8')).toBe('original\n');
+    expect(fs.readFileSync(path.join(project, 'handoff-tracked.txt'), 'utf8')).toBe('original\n');
+    expect(fs.existsSync(path.join(project, 'handoff-created.ts'))).toBe(false);
+    expect((await command('task', 'show', 'task-1')).stdout).toContain('Status: in_progress');
+    await expect(
+      successor('task', 'done', 'task-1', 'not yet', '--verify', 'node -e "process.exit(9)"')
+    ).rejects.toMatchObject({ code: 1 });
+    expect(fs.existsSync(path.join(project, 'handoff-created.ts'))).toBe(false);
+    expect((await command('task', 'show', 'task-1')).stdout).toContain('Verification attempts: 1');
+    await successor(
+      'task',
+      'done',
+      'task-1',
+      'reverified',
+      '--verify',
+      "node -e \"if(!require('fs').existsSync('handoff-created.ts'))process.exit(1)\""
+    );
+    expect(fs.readFileSync(path.join(project, 'handoff-created.ts'), 'utf8')).toContain(
+      'export const created'
+    );
+    expect(fs.readFileSync(path.join(project, 'handoff-tracked.txt'), 'utf8')).toBe('original\n');
+    expect((await command('task', 'show', 'task-1')).stdout).toContain('Status: verified');
+    expect((await run('git', ['status', '--porcelain'])).stdout).not.toContain(
+      'handoff-created.ts'
+    );
+    await command('abort');
+    const later = JSON.parse(
+      (await command('run', 'start', '--goal', 'Later run candidates')).stdout
+    );
+    await command('run', 'join');
+    expect(later.id).not.toBe(started.id);
+    expect(JSON.parse((await command('candidate', 'list')).stdout)).toEqual([]);
+    await expect(command('candidate', 'show', 'latest')).rejects.toMatchObject({ code: 1 });
+    await command('abort');
+    await betaCmd('abort');
+  } finally {
+    await command('abort').catch(() => {});
+    await betaCmd('abort').catch(() => {});
+    provider.closeAllConnections();
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
+  }
+}, 70_000);
+
+it('keeps the sandbox when preservation fails and does not save a candidate on abort', async () => {
+  await command('abort').catch(() => {});
+  fs.mkdirSync(path.join(project, 'node_modules'), { recursive: true });
+  fs.writeFileSync(path.join(project, 'node_modules', 'keep.txt'), 'host dependency\n');
+  const provider = createHttpServer(async (req, res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    const shell = raw.includes('do not preserve on abort')
+      ? "printf 'abort me\\n' > abort-note.txt && echo READY && sleep 30"
+      : 'pi-messenger-swarm run join && echo READY && sleep 30';
+    writeToolTurn(res, raw.includes('do not preserve on abort') ? 'abort' : 'broken', shell);
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  try {
+    const broken = JSON.parse(
+      (await command('run', 'start', '--goal', 'Fail preservation', '--max-steps', '10')).stdout
+    );
+    await command('run', 'join');
+    await command('task', 'create', '--title', 'Broken sandbox');
+    await command('task', 'claim', 'task-1');
+    await command(
+      'spawn',
+      '--task-id',
+      'task-1',
+      '--name',
+      'Broken',
+      '--model',
+      'fixture/fixture',
+      'sleep until git is removed'
+    );
+    const brokenId = (await command('spawn', 'list')).stdout.match(/^- (\w+): Broken /m)?.[1];
+    expect(brokenId).toBeTruthy();
+    const sandbox = path.join(project, '.swarm', 'workspaces', `worker-${brokenId}`);
+    await vi.waitFor(
+      async () => expect((await command('ps', 'logs', brokenId!)).stdout).toContain('READY'),
+      { timeout: 15_000 }
+    );
+    fs.rmSync(path.join(sandbox, '.git'), { force: true });
+    const pid = Number(
+      (await command('ps')).stdout
+        .split('\n')
+        .find((line) => line.includes(`worker-${brokenId}`))!
+        .split('|')[4]
+        .trim()
+    );
+    process.kill(pid, 'SIGKILL');
+    await vi.waitFor(
+      async () =>
+        expect((await command('spawn', 'history')).stdout).toContain(
+          'Candidate preservation failed; Sandbox retained'
+        ),
+      { timeout: 10_000 }
+    );
+    expect(fs.existsSync(sandbox)).toBe(true);
+    expect(JSON.parse((await command('candidate', 'list')).stdout)).toEqual([]);
+    expect((await command('task', 'show', 'task-1')).stdout).toContain('Status: in_progress');
+    await command('abort');
+    expect(JSON.parse((await command('run', 'show', broken.id)).stdout).status).toBe('aborted');
+
+    const aborted = JSON.parse(
+      (await command('run', 'start', '--goal', 'Abort is not preservation', '--max-steps', '10'))
+        .stdout
+    );
+    await command('run', 'join');
+    await command('task', 'create', '--title', 'Live until abort');
+    await command(
+      'spawn',
+      '--task-id',
+      'task-1',
+      '--name',
+      'Live',
+      '--model',
+      'fixture/fixture',
+      'do not preserve on abort'
+    );
+    const liveId = (await command('spawn', 'list')).stdout.match(/^- (\w+): Live /m)?.[1];
+    await vi.waitFor(
+      async () => expect((await command('ps', 'logs', liveId!)).stdout).toContain('READY'),
+      { timeout: 15_000 }
+    );
+    await command('abort');
+    const saved = path.join(project, '.pi', 'messenger', 'candidates', aborted.id);
+    expect(
+      fs.existsSync(saved) ? fs.readdirSync(saved).filter((name) => name.endsWith('.json')) : []
+    ).toEqual([]);
+    expect(JSON.parse((await command('run', 'show', aborted.id)).stdout).status).toBe('aborted');
+    expect(fs.readFileSync(path.join(project, 'node_modules', 'keep.txt'), 'utf8')).toBe(
+      'host dependency\n'
+    );
+    expect(fs.existsSync(path.join(project, 'abort-note.txt'))).toBe(false);
+  } finally {
+    await command('abort').catch(() => {});
+    provider.closeAllConnections();
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
+  }
+}, 45_000);
+
+it('does not let a saved candidate revive pruned work or reset its verification attempts', async () => {
+  await command('abort').catch(() => {});
+  const provider = createHttpServer(async (req, res) => {
+    for await (const _chunk of req) {
+      /* The peer only has to leave a file and exit. */
+    }
+    writeToolTurn(
+      res,
+      'prune',
+      'printf \'draft\\n\' > pruned-note.txt && sleep 1 && kill -KILL "$PI_SWARM_PEER_PID"'
+    );
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  try {
+    await command('run', 'start', '--goal', 'Pruned work stays pruned', '--max-steps', '10');
+    await command('run', 'join');
+    await command('task', 'create', '--title', 'Already disproved');
+    await command('task', 'claim', 'task-1');
+    await command(
+      'spawn',
+      '--task-id',
+      'task-1',
+      '--name',
+      'Draft',
+      '--model',
+      'fixture/fixture',
+      'leave a pruned candidate'
+    );
+    await vi.waitFor(
+      async () => {
+        const listed = JSON.parse((await command('candidate', 'list', '--task', 'task-1')).stdout);
+        expect(listed[0]).toMatchObject({ peer: 'Draft', status: 'unverified', taskId: 'task-1' });
+      },
+      { timeout: 15_000 }
+    );
+    for (let attempt = 0; attempt < 3; attempt++)
+      await expect(
+        command('task', 'done', 'task-1', 'fails', '--verify', 'node -e "process.exit(7)"')
+      ).rejects.toMatchObject({ code: 1 });
+    expect((await command('task', 'show', 'task-1')).stdout).toContain('Status: dead_end');
+    expect((await command('task', 'show', 'task-1')).stdout).toContain('Verification attempts: 3');
+    await expect(
+      command('candidate', 'restore', 'latest', '--task', 'task-1')
+    ).rejects.toMatchObject({
+      code: 1,
+    });
+    expect((await command('task', 'show', 'task-1')).stdout).toContain('Status: dead_end');
+    expect((await command('task', 'show', 'task-1')).stdout).toContain('Verification attempts: 3');
+    expect(
+      JSON.parse((await command('candidate', 'list', '--task', 'task-1')).stdout)[0].status
+    ).toBe('unverified');
+    expect(fs.existsSync(path.join(project, 'pruned-note.txt'))).toBe(false);
+  } finally {
+    await command('abort').catch(() => {});
+    provider.closeAllConnections();
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
+  }
+}, 30_000);

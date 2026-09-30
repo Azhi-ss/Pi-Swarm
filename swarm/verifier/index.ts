@@ -102,13 +102,26 @@ export function generatePatch(cwd: string, taskId: string, outputRoot?: string):
       return null;
     }
 
-    // Run git add -N . so untracked files are captured as unified diffs
-    spawnSync('git add -N .', {
-      cwd,
-      shell: true,
-      encoding: 'utf-8',
-      stdio: ['ignore', 'ignore', 'ignore'],
-    });
+    // Intent-to-add captures new source files. Dependency and runtime
+    // directories stay out of the patch so a merge cannot rewrite them.
+    spawnSync(
+      'git',
+      [
+        'add',
+        '-N',
+        '--',
+        '.',
+        ':(exclude).pi',
+        ':(exclude).swarm',
+        ':(exclude)BLACKBOARD.md',
+        ':(exclude)node_modules',
+      ],
+      {
+        cwd,
+        encoding: 'utf-8',
+        stdio: ['ignore', 'ignore', 'ignore'],
+      }
+    );
 
     const diffRes = spawnSync('git diff HEAD --binary', {
       cwd,
