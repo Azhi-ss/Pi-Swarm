@@ -70,7 +70,11 @@ export function recoverRun(cwd: string): void {
     return;
   }
   if (run.consumedSteps >= run.maxSteps) {
-    void getCircuitBreaker(cwd, run.id).triggerAbort(cwd, run.id, 'Run budget exhausted');
+    void getCircuitBreaker(cwd, run.id).triggerAbort(
+      cwd,
+      run.id,
+      `Global step budget exceeded (${run.consumedSteps}/${run.maxSteps} steps)`
+    );
     return;
   }
   reconcileSpawnedAgents(cwd, run.id);
