@@ -14,7 +14,7 @@ import { removeWorktree } from './worktree/index.js';
 import { isProcessAlive } from '../lib.js';
 import { messengerDirs } from '../project.js';
 import { ensureSessionChannel } from '../channel.js';
-import { enqueueCritical } from './notifications.js';
+import { criticalHeader, enqueueCritical } from './notifications.js';
 import { generateAttributionBrief } from './watchdog/brief.js';
 import { acceptanceEvidence, executeRun, readyForAcceptance } from './handlers/run.js';
 
@@ -29,7 +29,7 @@ function notify(cwd: string, runId: string, to: string, id: string, text: string
       id,
       from: 'watchdog',
       to,
-      text: `Project: ${cwd}\nRun: ${runId}\nRecipient: ${to}\n${taskId ? `Task: ${taskId}\n` : ''}${text}`,
+      text: criticalHeader(cwd, runId, to, id, taskId) + text,
       timestamp: new Date().toISOString(),
       replyTo: null,
     },

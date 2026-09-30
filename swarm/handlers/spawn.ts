@@ -91,23 +91,22 @@ function spawnHistory(cwd: string, sessionId: string) {
 
   const lines: string[] = ['# Spawned Agent History', ''];
 
-  const describe = (agent: (typeof items)[number], withEnd: boolean) => {
+  const formatAgentLine = (agent: (typeof items)[number]) => {
     const tail = agent.taskId ? ` → ${agent.taskId}` : '';
-    const ended =
-      withEnd && agent.endedAt ? ` · ended ${new Date(agent.endedAt).toLocaleTimeString()}` : '';
+    const ended = agent.endedAt ? ` · ended ${new Date(agent.endedAt).toLocaleTimeString()}` : '';
     const error = agent.error?.split('\n')[0];
     return `- ${agent.id}: ${agent.name} (${formatRoleLabel(agent.role)})${tail}${ended}${error ? ` — ${error}` : ''}`;
   };
 
   if (running.length > 0) {
     lines.push('## Running');
-    for (const agent of running.slice(0, 8)) lines.push(describe(agent, false));
+    for (const agent of running.slice(0, 8)) lines.push(formatAgentLine(agent));
     lines.push('');
   }
 
   if (completed.length > 0) {
     lines.push(`## Completed (${completed.length})`);
-    for (const agent of completed.slice(0, 10)) lines.push(describe(agent, true));
+    for (const agent of completed.slice(0, 10)) lines.push(formatAgentLine(agent));
     if (completed.length > 10) {
       lines.push(`... and ${completed.length - 10} more`);
     }
@@ -116,13 +115,13 @@ function spawnHistory(cwd: string, sessionId: string) {
 
   if (failed.length > 0) {
     lines.push(`## Failed (${failed.length})`);
-    for (const agent of failed.slice(0, 5)) lines.push(describe(agent, true));
+    for (const agent of failed.slice(0, 5)) lines.push(formatAgentLine(agent));
     lines.push('');
   }
 
   if (stopped.length > 0) {
     lines.push(`## Stopped (${stopped.length})`);
-    for (const agent of stopped.slice(0, 5)) lines.push(describe(agent, true));
+    for (const agent of stopped.slice(0, 5)) lines.push(formatAgentLine(agent));
     lines.push('');
   }
 

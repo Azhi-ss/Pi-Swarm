@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import type { SpawnedAgent } from './types.js';
+import { PATCH_EXCLUDES } from './verifier/index.js';
 
 export interface HandoffCandidate {
   id: string;
@@ -49,16 +50,7 @@ export function preserveCandidate(agent: SpawnedAgent): void {
   try {
     const baseCommit = agent.baseCommit || git('rev-parse', 'HEAD').trim();
     git('read-tree', 'HEAD');
-    git(
-      'add',
-      '-A',
-      '--',
-      '.',
-      ':(exclude).pi',
-      ':(exclude).swarm',
-      ':(exclude)BLACKBOARD.md',
-      ':(exclude)node_modules'
-    );
+    git('add', '-A', '--', '.', ...PATCH_EXCLUDES);
     const patch = git('diff', '--cached', '--binary', baseCommit);
     if (!patch.trim()) return;
     fs.writeFileSync(path.join(dir, `${agent.id}.patch`), patch);

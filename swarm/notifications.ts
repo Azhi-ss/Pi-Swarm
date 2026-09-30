@@ -14,6 +14,16 @@ export interface CriticalNotification extends AgentMailMessage {
   receiverPid?: number;
   handledAt?: string;
 }
+/** The correlation lines a receiver needs to act on a Critical Notification. */
+export function criticalHeader(
+  project: string,
+  runId: string,
+  recipient: string,
+  incident: string,
+  taskId?: string
+): string {
+  return `Project: ${project}\nRun: ${runId}\nRecipient: ${recipient}\n${taskId ? `Task: ${taskId}\n` : ''}Incident: ${incident}\n`;
+}
 function directory(cwd: string, runId: string) {
   return path.join(messengerDirs(cwd, runId).base, 'critical');
 }

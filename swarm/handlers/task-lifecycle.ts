@@ -10,6 +10,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { listSpawned } from '../spawn.js';
+import { criticalHeader } from '../notifications.js';
 import {
   runVerification,
   detectProjectTestCommand,
@@ -336,7 +337,7 @@ export function taskDone(
             id: incident,
             from: 'verifier',
             to: state.agentName,
-            text: `🚨 [Verification Failed] Task ${existing.id} completion rejected (Attempt ${attempt}/${maxAttempts}):\nCommand: ${verifyCommand}\nExit Code: ${verifRes.exitCode}\n\n${output}\nTask: ${existing.id}\nRun: ${sessionId}\nProject: ${cwd}\nIncident: ${incident}`,
+            text: `${criticalHeader(cwd, sessionId, state.agentName, incident, existing.id)}🚨 [Verification Failed] Task ${existing.id} completion rejected (Attempt ${attempt}/${maxAttempts}):\nCommand: ${verifyCommand}\nExit Code: ${verifRes.exitCode}\n\n${output}`,
             timestamp: new Date().toISOString(),
             replyTo: null,
             channel: channelId,
@@ -489,7 +490,7 @@ export function taskDone(
             id: incident,
             from: 'verifier',
             to: state.agentName,
-            text: `Main branch evolved with conflicts. Rebase your sandbox onto latest HEAD and re-verify!\nTask: ${existing.id}\nRun: ${sessionId}\nProject: ${cwd}\nIncident: ${incident}`,
+            text: `${criticalHeader(cwd, sessionId, state.agentName, incident, existing.id)}Main branch evolved with conflicts. Rebase your sandbox onto latest HEAD and re-verify!`,
             timestamp: new Date().toISOString(),
             replyTo: null,
             channel: channelId,
