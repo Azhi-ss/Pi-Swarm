@@ -544,6 +544,7 @@ it('suspends only the failing task after three actual replacement startup failur
     async () => {
       const state = JSON.parse((await command('run', 'status')).stdout);
       expect(state.handoffs['task-1']).toMatchObject({ failures: 3, suspended: true });
+      expect(state.handoffs['task-1'].takenOver).not.toBe(true);
       expect(state.consumedSteps).toBe(0);
     },
     { timeout: 35_000, interval: 500 }
@@ -552,6 +553,7 @@ it('suspends only the failing task after three actual replacement startup failur
   await new Promise((resolve) => setTimeout(resolve, 1200));
   expect((await command('spawn', 'history')).stdout).toBe(history);
   expect((await command('task', 'show', 'task-1')).stdout).not.toContain('dead_end');
+  expect((await command('task', 'show', 'task-1')).stdout).toContain('Verification attempts: 0');
   await command('task', 'create', '--title', 'Another usable task');
   await command('task', 'claim', 'task-2');
   expect(JSON.parse((await command('notifications')).stdout)).toEqual(
@@ -1777,3 +1779,248 @@ it('does not let a saved candidate revive pruned work or reset its verification 
     await new Promise<void>((resolve) => provider.close(() => resolve()));
   }
 }, 30_000);
+
+it('suspends automatic handoff after three startup failures and resumes only when asked', async () => {
+  await command('abort').catch(() => {});
+  const requests: string[] = [];
+  const provider = createHttpServer(async (req, res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    requests.push(raw);
+    const suspended = raw.includes('Automatic Handoff suspended');
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    for (const choice of [
+      {
+        delta: { role: 'assistant', content: suspended ? 'HANDLED_SUSPENSION' : 'READY' },
+        finish_reason: null,
+      },
+      { delta: {}, finish_reason: 'stop' as const },
+    ])
+      res.write(
+        'data: ' +
+          JSON.stringify({
+            id: 'suspend',
+            object: 'chat.completion.chunk',
+            created: 1,
+            model: 'fixture',
+            choices: [{ index: 0, ...choice }],
+          }) +
+          '\n\n'
+      );
+    res.end('data: [DONE]\n\n');
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  const delegator = spawn(
+    path.join(install, 'node_modules/.bin/pi'),
+    [
+      '--mode',
+      'rpc',
+      '--no-session',
+      '--no-skills',
+      '--extension',
+      path.join(install, 'node_modules/pi-messenger-swarm/dist/index.js'),
+      '--provider',
+      'fixture',
+      '--model',
+      'fixture',
+    ],
+    { cwd: project, env, stdio: 'pipe' }
+  );
+  let output = '';
+  delegator.stdout.on('data', (c) => (output += c));
+  delegator.stderr.on('data', (c) => (output += c));
+  const exited = once(delegator, 'exit');
+  const other = path.join(root, 'handoff-other');
+  fs.mkdirSync(other, { recursive: true });
+  await run('git', ['init'], other);
+  await run(
+    'git',
+    [
+      '-c',
+      'user.email=test@example.test',
+      '-c',
+      'user.name=Test',
+      'commit',
+      '--allow-empty',
+      '-m',
+      'init',
+    ],
+    other
+  );
+  const otherCmd = (...args: string[]) =>
+    exec(process.execPath, [cli, ...args], {
+      cwd: other,
+      env: { ...env, PI_AGENT_NAME: 'OtherPeer' },
+      timeout: 20_000,
+    });
+  const asDelegator = (...args: string[]) =>
+    exec(process.execPath, [cli, ...args], {
+      cwd: project,
+      env: { ...env, PI_AGENT_NAME: 'Delegator', PI_SWARM_PEER_PID: String(process.pid) },
+      timeout: 20_000,
+    });
+  try {
+    delegator.stdin.write(JSON.stringify({ type: 'prompt', message: 'ready' }) + '\n');
+    await vi.waitFor(() => expect(output.includes('READY'), output.slice(-1500)).toBe(true), {
+      timeout: 15_000,
+    });
+    await asDelegator('run', 'start', '--goal', 'Suspend then resume', '--max-steps', '100000');
+    await asDelegator('run', 'join');
+    await asDelegator('task', 'create', '--title', 'Cannot take over');
+    await asDelegator('task', 'create', '--title', 'Still eligible');
+    await asDelegator(
+      'spawn',
+      '--task-id',
+      'task-1',
+      '--model',
+      'missing-provider/missing-model',
+      'Attempt work'
+    );
+    await vi.waitFor(
+      async () => {
+        const state = JSON.parse((await asDelegator('run', 'status')).stdout);
+        expect(state.handoffs['task-1']).toMatchObject({ failures: 3, suspended: true });
+        expect(state.handoffs['task-1'].takenOver).not.toBe(true);
+      },
+      { timeout: 35_000, interval: 500 }
+    );
+    await vi.waitFor(
+      () => expect(output.includes('HANDLED_SUSPENSION'), output.slice(-2000)).toBe(true),
+      { timeout: 15_000 }
+    );
+    expect(
+      requests.some(
+        (raw) =>
+          raw.includes('Automatic Handoff suspended') &&
+          raw.includes('Verification attempts unchanged')
+      )
+    ).toBe(true);
+    const notes = JSON.parse((await asDelegator('notifications')).stdout);
+    expect(notes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ to: 'Delegator', taskId: 'task-1', status: 'handled' }),
+      ])
+    );
+    const history = (await asDelegator('spawn', 'history')).stdout;
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    expect((await asDelegator('spawn', 'history')).stdout).toBe(history);
+    expect((await asDelegator('task', 'show', 'task-1')).stdout).toContain(
+      'Verification attempts: 0'
+    );
+    await asDelegator('task', 'claim', 'task-2');
+    expect((await asDelegator('task', 'show', 'task-2')).stdout).toContain('Status: in_progress');
+    await otherCmd('run', 'start', '--goal', 'Other project during suspension');
+    await otherCmd('run', 'join');
+    await otherCmd('task', 'create', '--title', 'Independent');
+    await otherCmd('task', 'claim', 'task-1');
+    expect((await otherCmd('task', 'show', 'task-1')).stdout).toContain('Status: in_progress');
+    await asDelegator('handoff', 'resume', 'task-1');
+    const resumed = JSON.parse((await asDelegator('handoff', 'status')).stdout);
+    expect(resumed['task-1'].suspended).toBe(false);
+    expect(resumed['task-1'].failures).toBe(0);
+    await vi.waitFor(
+      async () => {
+        const state = JSON.parse((await asDelegator('run', 'status')).stdout);
+        expect(state.handoffs['task-1'].suspended).not.toBe(true);
+        expect((await asDelegator('spawn', 'history')).stdout).not.toBe(history);
+      },
+      { timeout: 15_000 }
+    );
+    expect((await asDelegator('task', 'show', 'task-1')).stdout).toContain(
+      'Verification attempts: 0'
+    );
+    expect((await asDelegator('task', 'show', 'task-1')).stdout).not.toContain('dead_end');
+    const active = JSON.parse((await asDelegator('run', 'status')).stdout);
+    const spawnLog = path.join(project, '.pi', 'messenger', 'agents', `${active.id}.jsonl`);
+    const spawnedIds = (text: string) =>
+      text
+        .split('\n')
+        .filter((line) => line.includes('"type":"spawned"'))
+        .map((line) => JSON.parse(line).id);
+    const beforeAbort = spawnedIds(fs.readFileSync(spawnLog, 'utf8'));
+    await asDelegator('abort');
+    expect(JSON.parse((await asDelegator('run', 'show', active.id)).stdout).status).toBe('aborted');
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    expect(spawnedIds(fs.readFileSync(spawnLog, 'utf8'))).toEqual(beforeAbort);
+    await otherCmd('abort');
+  } finally {
+    delegator.kill('SIGTERM');
+    await exited.catch(() => {});
+    await command('abort').catch(() => {});
+    await otherCmd('abort').catch(() => {});
+    provider.closeAllConnections();
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
+  }
+}, 70_000);
+
+it('does not replace a task that a live peer still holds', async () => {
+  await command('abort').catch(() => {});
+  const provider = createHttpServer(async (req, res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    const shell = raw.includes('hold the lease')
+      ? 'pi-messenger-swarm run join && pi-messenger-swarm task claim task-1 && echo HOLDING && sleep 25'
+      : 'echo QUIT && kill -KILL "$PI_SWARM_PEER_PID"';
+    writeToolTurn(res, raw.includes('hold the lease') ? 'hold' : 'quit', shell);
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  try {
+    await command(
+      'run',
+      'start',
+      '--goal',
+      'Respect a live lease',
+      '--max-steps',
+      '20',
+      '--concurrency',
+      '2'
+    );
+    await command('run', 'join');
+    await command('task', 'create', '--title', 'Held by a live peer');
+    await command(
+      'spawn',
+      '--task-id',
+      'task-1',
+      '--name',
+      'Holder',
+      '--model',
+      'fixture/fixture',
+      'hold the lease'
+    );
+    const holderId = (await command('spawn', 'list')).stdout.match(/^- (\w+): Holder /m)?.[1];
+    await vi.waitFor(
+      async () => expect((await command('ps', 'logs', holderId!)).stdout).toContain('HOLDING'),
+      { timeout: 15_000 }
+    );
+    const before = (await command('spawn', 'history')).stdout;
+    await command(
+      'spawn',
+      '--task-id',
+      'task-1',
+      '--name',
+      'Quitter',
+      '--model',
+      'fixture/fixture',
+      'exit immediately'
+    );
+    await vi.waitFor(
+      async () => expect((await command('spawn', 'history')).stdout).toContain('Quitter'),
+      { timeout: 15_000 }
+    );
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    expect((await command('task', 'show', 'task-1')).stdout).toContain('Claimed by: Holder');
+    expect((await command('spawn', 'list')).stdout).toContain('Holder');
+    expect((await command('spawn', 'list')).stdout).not.toContain('Successor');
+    const names = (await command('spawn', 'history')).stdout;
+    expect(names).toContain('Holder');
+    expect((names.match(/^- /gm) || []).length).toBe((before.match(/^- /gm) || []).length + 1);
+  } finally {
+    await command('abort').catch(() => {});
+    provider.closeAllConnections();
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
+  }
+}, 40_000);
