@@ -87,6 +87,11 @@ export function getContextSessionId(ctx: ExtensionContext): string {
   }
 }
 
+/** Swarm operations follow the Project's active run, not a conversation id. */
+export function swarmSessionId(cwd: string, interactionSessionId = ''): string {
+  return activeRunId(cwd) || interactionSessionId;
+}
+
 /**
  * Read a channel's sessionId from the project-scoped location.
  * Returns null if channel doesn't exist or has no sessionId.

@@ -9,6 +9,7 @@ import {
 } from '../../lib.js';
 import { displayChannelLabel, normalizeChannelId } from '../../channel.js';
 import { listSpawnedHistory } from '../../swarm/spawn.js';
+import { activeRunId } from '../../project.js';
 import { getEffectiveSessionId } from '../../store/shared.js';
 import {
   formatFeedLine,
@@ -78,6 +79,7 @@ export function executeSend(
   const inboxDir = join(dirs.base, 'inbox');
   fs.mkdirSync(inboxDir, { recursive: true });
   for (const recipient of recipients) {
+    const runId = activeRunId(cwd);
     const mail: AgentMailMessage = {
       id: randomUUID(),
       from: state.agentName,
@@ -86,6 +88,8 @@ export function executeSend(
       timestamp: new Date().toISOString(),
       replyTo: replyTo ?? null,
       channel: targetChannel,
+      project: cwd,
+      ...(runId ? { runId } : {}),
     };
     fs.appendFileSync(join(inboxDir, `${recipient}.jsonl`), JSON.stringify(mail) + '\n', 'utf8');
   }

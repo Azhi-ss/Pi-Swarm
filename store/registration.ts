@@ -22,6 +22,7 @@ import {
   ensureStateChannels,
   getContextSessionId,
   getGitBranch,
+  swarmSessionId,
   normalizeCwd,
   normalizeJoinedChannels,
   updateChannelsInRegistration,
@@ -132,7 +133,7 @@ export function register(
     const registration: AgentRegistration = {
       name: state.agentName,
       pid: effectivePid,
-      sessionId: getContextSessionId(ctx),
+      sessionId: swarmSessionId(cwd, getContextSessionId(ctx)),
       cwd,
       model:
         (ctx.model as { id?: string } | undefined)?.id ??
@@ -220,7 +221,7 @@ export function updateRegistration(state: MessengerState, dirs: Dirs, ctx: Exten
       (typeof ctx.model === 'string' ? ctx.model : reg.model);
     const currentSessionId = getContextSessionId(ctx);
     reg.model = currentModel;
-    reg.sessionId = currentSessionId;
+    reg.sessionId = swarmSessionId(normalizeCwd(ctx.cwd ?? process.cwd()), currentSessionId);
     state.model = currentModel;
     state.contextSessionId = currentSessionId;
     reg.reservations = state.reservations.length > 0 ? state.reservations : undefined;
@@ -257,7 +258,7 @@ export function flushActivityToRegistry(
       (typeof ctx.model === 'string' ? ctx.model : reg.model);
     const currentSessionId = getContextSessionId(ctx);
     reg.model = currentModel;
-    reg.sessionId = currentSessionId;
+    reg.sessionId = swarmSessionId(normalizeCwd(ctx.cwd ?? process.cwd()), currentSessionId);
     state.model = currentModel;
     state.contextSessionId = currentSessionId;
     reg.session = { ...state.session };
@@ -401,7 +402,7 @@ export function renameAgent(
   const registration: AgentRegistration = {
     name: newName,
     pid: effectivePid,
-    sessionId: getContextSessionId(ctx),
+    sessionId: swarmSessionId(cwd, getContextSessionId(ctx)),
     cwd,
     model:
       (ctx.model as { id?: string } | undefined)?.id ??

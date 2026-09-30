@@ -1,3 +1,4 @@
+import { activeRunId } from '../../project.js';
 import type { WatchdogConfig, ReclaimResult, AllDeadStatus, SteerSender } from './types.js';
 import { inspectAndReclaimStaleLeases } from './lease.js';
 import { checkAllDead, triggerAllDeadFallback, resetFallbackLatch } from './fallback.js';
@@ -43,11 +44,12 @@ export class WatchdogService {
    * 2. Check all-dead conditions and trigger Steer fallback if unlatched
    */
   public tick(now: number = Date.now()): { reclaimed: ReclaimResult; allDead: AllDeadStatus } {
-    const reclaimed = inspectAndReclaimStaleLeases(this.cwd, this.sessionId, now, this.config);
-    const allDead = checkAllDead(this.cwd, this.sessionId);
+    const sessionId = activeRunId(this.cwd) || this.sessionId;
+    const reclaimed = inspectAndReclaimStaleLeases(this.cwd, sessionId, now, this.config);
+    const allDead = checkAllDead(this.cwd, sessionId);
 
     if (allDead.isAllDead && !allDead.fallbackTriggered) {
-      triggerAllDeadFallback(this.cwd, this.sessionId, allDead, this.steerSender);
+      triggerAllDeadFallback(this.cwd, sessionId, allDead, this.steerSender);
     }
 
     return { reclaimed, allDead };

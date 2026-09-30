@@ -57,7 +57,12 @@ import * as http from 'node:http';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-import { resolveProjectContext, messengerDirs, configuredStorage } from '../project.js';
+import {
+  activeRunId,
+  resolveProjectContext,
+  messengerDirs,
+  configuredStorage,
+} from '../project.js';
 let selectedProject: string | undefined;
 
 const PORT = Number(process.env.PI_MESSENGER_PORT ?? 9877);
@@ -235,7 +240,11 @@ function agentHeaders(): Record<string, string> {
   const headers: Record<string, string> = {};
   const storage = configuredStorage();
   if (storage) headers['x-storage-root'] = path.resolve(storage);
-  if (process.env.PI_SWARM_RUN_ID) headers['x-run-id'] = process.env.PI_SWARM_RUN_ID;
+  const projectRoot = resolveProjectRoot(process.cwd());
+  const boundRun = activeRunId(projectRoot);
+  const pinnedRun = process.env.PI_SWARM_RUN_ID?.trim();
+  if (pinnedRun) headers['x-run-id'] = pinnedRun;
+  else if (boundRun) headers['x-run-id'] = boundRun;
 
   // Identity resolution strategy (in priority order):
   // 1. Explicit env var (PI_AGENT_NAME) — set by parent on spawn for subagents
@@ -255,13 +264,16 @@ function agentHeaders(): Record<string, string> {
   const callerPid = Number(process.env.PI_SWARM_PEER_PID) || findCallerPid();
   if (callerPid) headers['x-caller-pid'] = String(callerPid);
 
-  const sessionId = process.env.PI_SWARM_RUN_ID || readSessionIdFromFile();
+  // A pinned run that is no longer active must stay visible so the service
+  // rejects it. Otherwise the active run replaces a foreign Interaction Session.
+  const sessionId =
+    pinnedRun && pinnedRun !== boundRun ? pinnedRun : boundRun || readSessionIdFromFile();
   if (sessionId) headers['x-session-id'] = sessionId;
 
   // Send the project root (not the raw cwd) so the harness server
   // resolves dirs consistently regardless of which subdirectory
   // the CLI was invoked from.
-  headers['x-caller-cwd'] = resolveProjectRoot(process.cwd());
+  headers['x-caller-cwd'] = projectRoot;
 
   // Forward PI_MESSENGER_CHANNEL as a request header so that spawned
   // subagents (which inherit this env var from their parent) can join

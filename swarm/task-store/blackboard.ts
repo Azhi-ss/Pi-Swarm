@@ -1,4 +1,4 @@
-import { messengerDirs } from '../../project.js';
+import { activeRunId, messengerDirs } from '../../project.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { SwarmTask } from '../types.js';
@@ -82,7 +82,11 @@ export function generateBlackboard(cwd: string, sessionId: string): string {
 
   // Header & Status
   lines.push('# 🐝 Pi-Swarm Global Blackboard');
-  lines.push(`> Updated: ${timestamp} | Session: ${sessionId} | Active Peers: ${peers.length}`);
+  const identity =
+    activeRunId(cwd) === sessionId
+      ? `Project: ${cwd} | Run: ${sessionId}`
+      : `Session: ${sessionId}`;
+  lines.push(`> Updated: ${timestamp} | ${identity} | Active Peers: ${peers.length}`);
   lines.push(
     `> Progress: Total: ${summary.total} | Goals: ${goalTasks.length} | Staked: ${stakedTasks.length} | Verified: ${verifiedTasks.length} | Dead Ends: ${graveyardTasks.length}`
   );

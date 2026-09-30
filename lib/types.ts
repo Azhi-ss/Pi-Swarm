@@ -45,6 +45,8 @@ export interface AgentMailMessage {
   timestamp: string;
   replyTo: string | null;
   channel?: string;
+  project?: string;
+  runId?: string;
 }
 
 export interface ReservationConflict {

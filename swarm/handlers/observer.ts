@@ -76,7 +76,7 @@ export function executeObserverStatus(
   dirs: Dirs
 ) {
   const snapshot = readSnapshot(cwd);
-  const workers = new Map<number, { name: string; pid: number }>();
+  const workers = new Map<string, { name: string; pid: number }>();
   for (const peer of getActiveAgents({ ...state, agentName: '', scopeToFolder: false }, dirs, {
     gc: false,
   })) {
@@ -86,15 +86,15 @@ export function executeObserverStatus(
       (location === '' || location.startsWith(`.swarm${path.sep}workspaces${path.sep}`)) &&
       isProcessAlive(peer.pid)
     )
-      workers.set(peer.pid, { name: peer.name, pid: peer.pid });
+      workers.set(`${peer.name}:${peer.pid}`, { name: peer.name, pid: peer.pid });
   }
   for (const peer of listSpawned(cwd, sessionId)) {
     if (peer.pid && isProcessAlive(peer.pid))
-      workers.set(peer.pid, { name: peer.name, pid: peer.pid });
+      workers.set(`${peer.name}:${peer.pid}`, { name: peer.name, pid: peer.pid });
   }
   for (const peer of processManager.list()) {
     if (normalizeCwd(peer.cwd) === normalizeCwd(cwd) && isProcessAlive(peer.pid))
-      workers.set(peer.pid, { name: peer.agentName, pid: peer.pid });
+      workers.set(`${peer.agentName}:${peer.pid}`, { name: peer.agentName, pid: peer.pid });
   }
   const colors = [36, 33, 32, 31];
   const lines = ['\x1b[1m┌─ Pi-Swarm Status ─────────────────────\x1b[0m', snapshot.header];
@@ -121,6 +121,7 @@ export function executeObserverStatus(
 
 export function executeObserverExplain(cwd: string) {
   const { available, header, zones } = readSnapshot(cwd);
+  const run = runStatus(cwd);
   // A byte is a conservative token upper bound for byte-based tokenizers:
   // the admitted projection stays below 1000 even with CJK text or long logs.
   const snapshot = [header, ...zones.map((zone, index) => `${zoneNames[index]}:\n${zone}`)].join(
@@ -128,7 +129,7 @@ export function executeObserverExplain(cwd: string) {
   );
   const text = [
     'Swarm situation brief — BLACKBOARD.md snapshot',
-    `Project: ${cwd} · ${runStatus(cwd).phase}`,
+    `Project: ${cwd} · ${'id' in run ? `Run: ${run.id} · ` : ''}${run.phase}`,
     header,
     '',
     'Completed milestones (recorded in Verified):',

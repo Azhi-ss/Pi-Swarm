@@ -555,7 +555,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
         try {
           if (fs.existsSync(regPath)) {
             const reg = JSON.parse(fs.readFileSync(regPath, 'utf-8'));
-            if (!reg.sessionId) {
+            if (runId ? reg.sessionId !== runId : !reg.sessionId) {
               reg.sessionId = effectiveSessionId;
               fs.writeFileSync(regPath, JSON.stringify(reg, null, 2));
             }

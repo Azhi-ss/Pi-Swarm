@@ -1,19 +1,29 @@
 import { displayChannelLabel, normalizeChannelId } from '../../channel.js';
+import { activeRunId } from '../../project.js';
 import { result } from '../result.js';
 import * as taskStore from '../task-store.js';
 import { summaryLine } from './_utils.js';
+
+function runIdentity(cwd: string): string[] {
+  const runId = activeRunId(cwd);
+  return [`Project: ${cwd}`, ...(runId ? [`Run: ${runId}`] : [])];
+}
 
 export function taskList(cwd: string, channelId: string, sessionId: string) {
   const tasks = taskStore.getTasks(cwd, sessionId);
   if (tasks.length === 0) {
     return result(
-      `No tasks yet in ${displayChannelLabel(channelId)}. Create one with task.create.`,
+      [
+        `No tasks yet in ${displayChannelLabel(channelId)}. Create one with task.create.`,
+        ...runIdentity(cwd),
+      ].join('\n'),
       { mode: 'task.list', channel: normalizeChannelId(channelId), tasks: [] }
     );
   }
 
   const lines: string[] = [
     `# Swarm Tasks ${displayChannelLabel(channelId)}`,
+    ...runIdentity(cwd),
     '',
     `Summary: ${summaryLine(cwd, sessionId)}`,
     '',
@@ -61,6 +71,7 @@ export function taskShow(
 
   const lines: string[] = [
     `# ${task.id}: ${task.title}`,
+    ...runIdentity(cwd),
     '',
     `Channel: ${displayChannelLabel(channelId)}`,
     `Status: ${task.status}`,

@@ -3,6 +3,7 @@ import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { AgentMailMessage, Dirs, MessengerState, NameThemeConfig } from '../../lib.js';
 import { displaySpecPath, extractFolder, resolveSpecPath } from '../../lib.js';
 import { displayChannelLabel } from '../../channel.js';
+import { activeRunId } from '../../project.js';
 import { ensureStateChannels } from '../../store/shared.js';
 import { getContextSessionId } from '../../store/shared.js';
 import * as store from '../../store.js';
@@ -103,8 +104,9 @@ export function executeJoin(
       updateStatusFn(ctx);
     }
     const agents = store.getActiveAgents(state, dirs);
+    const runId = activeRunId(cwd);
     return result(
-      `Already joined as ${state.agentName} in ${displayChannelLabel(state.currentChannel)}. ${agents.length} peer${agents.length === 1 ? '' : 's'} active.`,
+      `Already joined as ${state.agentName} in ${displayChannelLabel(state.currentChannel)}. ${agents.length} peer${agents.length === 1 ? '' : 's'} active.${runId ? ` Swarm Run: ${runId}.` : ''}`,
       {
         mode: 'join',
         alreadyJoined: true,
@@ -130,7 +132,9 @@ export function executeJoin(
   const locationPart = state.gitBranch ? `${folder} on ${state.gitBranch}` : folder;
   const channelLabel = displayChannelLabel(state.currentChannel);
 
+  const runId = activeRunId(cwd);
   let text = `Joined as ${state.agentName} in ${locationPart} on ${channelLabel}. ${agents.length} peer${agents.length === 1 ? '' : 's'} active.`;
+  if (runId) text += ` Swarm Run: ${runId}.`;
 
   if (state.spec) {
     text += `\nSpec: ${displaySpecPath(state.spec, cwd)}`;

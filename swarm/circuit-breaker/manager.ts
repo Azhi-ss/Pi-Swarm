@@ -97,7 +97,7 @@ export class CircuitBreakerManager {
     try {
       const snapshot = fs.readFileSync(path.join(cwd, 'BLACKBOARD.md'), 'utf8');
       snapshotSessionId =
-        snapshot.match(/^> Updated: [^\n]* \| Session: ([^\n|]*) \| Active Peers:/m)?.[1] ??
+        snapshot.match(/\| (?:Session|Run): ([^|\n]*?) \| Active Peers:/m)?.[1]?.trim() ??
         sessionId;
     } catch {
       // No projection yet; use the caller's session.

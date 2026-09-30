@@ -393,17 +393,31 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     // Write the session ID to disk so the harness server (and CLI)
     // can discover it. The harness runs as a separate process and
     // has no access to pi's SessionManager — this file bridges that gap.
-    const sessionId = getContextSessionId(ctx);
+    let project = ctx.cwd;
+    try {
+      project = resolveProjectContext({
+        cwd: ctx.cwd,
+        peer: process.env.PI_SWARM_PROJECT_ROOT,
+      });
+    } catch {
+      // Session startup still records the Interaction Session when no Project is selected.
+    }
+    let sessionId = getContextSessionId(ctx);
+    try {
+      sessionId = activeRunId(project) || sessionId;
+    } catch {
+      // Keep the Interaction Session when the Project path cannot be read.
+    }
     if (sessionId) {
       try {
-        const sessionFilePath = join(dirs.base, 'session-id');
+        const sessionFilePath = join(messengerDirs(project).base, 'session-id');
         fs.writeFileSync(sessionFilePath, sessionId, 'utf-8');
       } catch {
         // Best effort
       }
 
       watchdogService = new WatchdogService(
-        process.cwd(),
+        project,
         sessionId,
         { pollIntervalMs: 5000, leaseTtlSeconds: 300 },
         (payload) => {
