@@ -14,6 +14,8 @@ import {
 import { portSlotManager } from '../../swarm/worktree/ports.js';
 import { taskDone } from '../../swarm/handlers/task-lifecycle.js';
 import * as taskStore from '../../swarm/task-store.js';
+import { startRun } from '../../swarm/run-store.js';
+import { resolveProjectContext } from '../../project.js';
 
 const tempDirs = new Set<string>();
 
@@ -164,6 +166,10 @@ describe('Module 7: Dedicated Worktree Sandbox', () => {
 
     // Release works without error
     expect(() => removeWorktree(nonGitDir, agentId)).not.toThrow();
+
+    fs.mkdirSync(path.join(nonGitDir, '.pi'));
+    expect(resolveProjectContext({ cwd: nonGitDir })).toBe(fs.realpathSync(nonGitDir));
+    expect(fs.existsSync(path.join(nonGitDir, '.git'))).toBe(false);
   });
 
   it('integrates with taskDone: executes verification and extracts diff patch from worktree', () => {
@@ -228,5 +234,74 @@ describe('Module 7: Dedicated Worktree Sandbox', () => {
 
     // Clean up
     removeWorktree(gitDir, agentId);
+  });
+
+  function git(cwd: string, args: string): string {
+    return cp.execSync(`git ${args}`, { cwd, encoding: 'utf-8' });
+  }
+
+  function hostChanges(cwd: string): string[] {
+    return git(cwd, 'status --porcelain --untracked-files=all').split('\n').filter(Boolean);
+  }
+
+  it('keeps Sandboxes and runtime data out of the host Git status', () => {
+    const repo = createTempDir('worktree-host-clean-');
+    initGitRepo(repo);
+    fs.writeFileSync(
+      path.join(repo, 'package.json'),
+      JSON.stringify({ name: 'test-pkg', scripts: { test: 'node -e "process.exit(0)"' } })
+    );
+    fs.mkdirSync(path.join(repo, '.pi'));
+    fs.writeFileSync(path.join(repo, '.pi', 'pi-messenger.json'), '{}\n');
+    git(repo, 'add .');
+    git(repo, 'commit -m "add package.json"');
+    // A subdirectory Project and a template-less repo exercise anchoring and a missing info/exclude.
+    fs.rmSync(path.join(repo, '.git', 'info'), { recursive: true, force: true });
+    fs.writeFileSync(path.join(repo, 'README.md'), '# Edited by the human\n');
+    fs.writeFileSync(path.join(repo, 'notes.txt'), 'mine\n');
+    fs.writeFileSync(path.join(repo, '.pi', 'pi-messenger.json'), '{ "edited": true }\n');
+    const nested = path.join(repo, 'packages', 'app');
+    fs.mkdirSync(path.join(nested, '.pi'), { recursive: true });
+    const userChanges = [' M .pi/pi-messenger.json', ' M README.md', '?? notes.txt'];
+
+    const project = resolveProjectContext({ cwd: repo });
+    const sessionId = startRun(project, { goal: 'keep host clean', delegator: 'Delegator' }).id;
+    const info = createWorktree(project, 'worker-clean', 'CleanAgent');
+    const task = taskStore.createTask(project, sessionId, { title: 'Sandbox work' }, 'default');
+    taskStore.claimTask(project, sessionId, task.id, 'CleanAgent');
+    expect(hostChanges(repo)).toEqual(userChanges);
+
+    fs.writeFileSync(path.join(info.worktreePath, 'feature.js'), 'module.exports = 42;\n');
+    const res = taskDone(
+      { id: task.id, summary: 'Done in sandbox' } as any,
+      { agentName: 'CleanAgent' } as any,
+      project,
+      'default',
+      sessionId
+    );
+    expect(res.details.verified).toBe(true);
+    expect(fs.existsSync(path.join(project, res.details.patch as string))).toBe(true);
+    expect(fs.existsSync(path.join(project, 'BLACKBOARD.md'))).toBe(true);
+    expect(hostChanges(repo)).toEqual(userChanges);
+
+    const nestedProject = resolveProjectContext({ cwd: nested });
+    resolveProjectContext({ cwd: nested });
+    startRun(nestedProject, { goal: 'nested', delegator: 'Delegator' });
+    fs.writeFileSync(path.join(nested, 'BLACKBOARD.md'), '# board\n');
+    fs.writeFileSync(path.join(nested, '.pi', 'pi-messenger.json'), '{}\n');
+    expect(hostChanges(repo)).toEqual([...userChanges, '?? packages/app/.pi/pi-messenger.json']);
+
+    const exclude = fs.readFileSync(path.join(repo, '.git', 'info', 'exclude'), 'utf-8');
+    expect(exclude.split('\n').filter((line) => line.includes('.swarm/'))).toHaveLength(2);
+
+    git(repo, 'add -A');
+    expect(git(repo, 'diff --cached --name-only').split('\n').filter(Boolean)).toEqual([
+      '.pi/pi-messenger.json',
+      'README.md',
+      'notes.txt',
+      'packages/app/.pi/pi-messenger.json',
+    ]);
+
+    removeWorktree(project, info);
   });
 });

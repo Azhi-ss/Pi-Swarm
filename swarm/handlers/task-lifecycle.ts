@@ -8,7 +8,7 @@ import type { SwarmTaskEvidence } from '../types.js';
 import { summaryLine } from './_utils.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { ensureGitExclude } from '../../project.js';
 import { listSpawned } from '../spawn.js';
 import { criticalHeader } from '../notifications.js';
 import {
@@ -21,31 +21,6 @@ import {
 } from '../verifier/index.js';
 import { getWorktreeInfo } from '../worktree/index.js';
 import { getCircuitBreaker } from '../circuit-breaker/index.js';
-
-/**
- * Ensures BLACKBOARD.md is excluded from Git status without dirtying .gitignore or tracked files.
- */
-function ensureGitExclude(cwd: string): void {
-  try {
-    const res = spawnSync('git', ['rev-parse', '--git-path', 'info/exclude'], {
-      cwd,
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    if (res.status === 0 && res.stdout.trim()) {
-      const trimmed = res.stdout.trim();
-      const excludePath = path.isAbsolute(trimmed) ? trimmed : path.resolve(cwd, trimmed);
-      if (fs.existsSync(excludePath)) {
-        const content = fs.readFileSync(excludePath, 'utf-8');
-        if (!content.includes('BLACKBOARD.md')) {
-          fs.appendFileSync(excludePath, '\nBLACKBOARD.md\n');
-        }
-      }
-    }
-  } catch {
-    // Ignore
-  }
-}
 
 export function taskClaim(
   params: MessengerActionParams,

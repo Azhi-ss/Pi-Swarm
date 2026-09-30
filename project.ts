@@ -16,11 +16,30 @@ export function resolveProjectContext(input: {
   explicit?: string;
   peer?: string;
 }): string {
-  const explicit = input.explicit?.trim();
-  if (explicit) return resolveProject(explicit);
-  const peer = input.peer?.trim();
-  if (peer) return resolveProject(peer);
-  return resolveProject(input.cwd);
+  const project = resolveProject(input.explicit?.trim() || input.peer?.trim() || input.cwd);
+  ensureGitExclude(project);
+  return project;
+}
+
+/** Keeps Sandboxes and runtime data out of the host's Git status without touching tracked files. */
+export function ensureGitExclude(project: string): void {
+  try {
+    const [prefix, exclude] = execFileSync(
+      'git',
+      ['rev-parse', '--show-prefix', '--git-path', 'info/exclude'],
+      { cwd: project, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
+    ).split('\n');
+    const file = path.resolve(project, exclude);
+    const lines = fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split(/\r?\n/) : [];
+    const missing = ['.swarm/', '.pi/messenger/', 'BLACKBOARD.md']
+      .map((entry) => `/${prefix}${entry}`)
+      .filter((entry) => !lines.includes(entry));
+    if (!missing.length) return;
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.appendFileSync(file, `${lines.at(-1) ? '\n' : ''}${missing.join('\n')}\n`);
+  } catch {
+    // Outside Git there is nothing to exclude.
+  }
 }
 
 export function resolveProject(start: string): string {
