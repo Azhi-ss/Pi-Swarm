@@ -1,4 +1,4 @@
-import { messengerDirs, activeRunId } from '../project.js';
+import { messengerDirs, swarmSessionId } from '../project.js';
 import * as fs from 'node:fs';
 import { execSync } from 'node:child_process';
 import { join, resolve } from 'node:path';
@@ -87,10 +87,7 @@ export function getContextSessionId(ctx: ExtensionContext): string {
   }
 }
 
-/** Swarm operations follow the Project's active run, not a conversation id. */
-export function swarmSessionId(cwd: string, interactionSessionId = ''): string {
-  return activeRunId(cwd) || interactionSessionId;
-}
+export { swarmSessionId };
 
 /**
  * Read a channel's sessionId from the project-scoped location.
@@ -122,7 +119,7 @@ export function getProjectChannelSessionId(cwd: string, channelId: string): stri
  * regardless of which pi process (parent or subagent) performs them.
  */
 export function getEffectiveSessionId(cwd: string, state: MessengerState): string {
-  const run = activeRunId(cwd);
+  const run = swarmSessionId(cwd);
   if (run) return run;
   const currentChannel = state.currentChannel ?? state.sessionChannel;
   if (currentChannel) {
@@ -143,7 +140,7 @@ export function ensureStateChannels(
   ensureDefaultNamedChannels(dirs, state.agentName || undefined);
 
   const inheritedChannel = process.env.PI_MESSENGER_CHANNEL?.trim();
-  const sessionId = activeRunId(ctx.cwd) || getContextSessionId(ctx);
+  const sessionId = swarmSessionId(ctx.cwd, getContextSessionId(ctx));
 
   let sessionChannel = state.sessionChannel?.trim();
   let resetToSessionChannel = false;

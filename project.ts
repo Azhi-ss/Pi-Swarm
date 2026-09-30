@@ -67,6 +67,17 @@ export function activeRunId(cwd: string): string | undefined {
   }
 }
 
+/** Swarm operations follow the owning Project's active run, not a conversation id. */
+export function swarmSessionId(cwd: string, interactionSessionId = ''): string {
+  let project = cwd;
+  try {
+    project = resolveProject(cwd);
+  } catch {
+    // Missing Project Context keeps the Interaction Session.
+  }
+  return activeRunId(project) || interactionSessionId;
+}
+
 export function configuredStorage(): string | undefined {
   return (
     process.env.PI_MESSENGER_DIR?.trim() ||

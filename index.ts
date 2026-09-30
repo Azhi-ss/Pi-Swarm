@@ -5,6 +5,7 @@ import {
   configuredStorage,
   selectStorage,
   activeRunId,
+  swarmSessionId,
 } from './project.js';
 /**
  * Pi Messenger Extension
@@ -402,12 +403,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     } catch {
       // Session startup still records the Interaction Session when no Project is selected.
     }
-    let sessionId = getContextSessionId(ctx);
-    try {
-      sessionId = activeRunId(project) || sessionId;
-    } catch {
-      // Keep the Interaction Session when the Project path cannot be read.
-    }
+    const sessionId = swarmSessionId(project, getContextSessionId(ctx));
     if (sessionId) {
       try {
         const sessionFilePath = join(messengerDirs(project).base, 'session-id');
