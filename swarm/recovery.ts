@@ -13,7 +13,7 @@ import {
   recordRetainedSandbox,
 } from './spawn.js';
 import { replayTasks, appendTaskEvent } from './task-store/events.js';
-import { getAllTasks } from './task-store/queries.js';
+import { getAllTasks, getTaskSpec } from './task-store/queries.js';
 import { writeBlackboard } from './task-store/blackboard.js';
 import { listCandidates } from './candidates.js';
 import { isProcessAlive } from '../lib.js';
@@ -26,6 +26,91 @@ import { claimableRejection, computeWidth, isDeferredAdmission } from './width.j
 
 /** A failed check reads external evidence the task log does not contain. */
 const FAILED_ACCEPTANCE_RETRY_MS = 2_000;
+
+/** Width, budget, and stopped-run refusals end the fill. A non-claimable task does not. */
+function stopsFill(message: string): boolean {
+  return (
+    message.includes('Width Cap') ||
+    message.includes('peer admission') ||
+    message.includes('Circuit breaker is tripped') ||
+    message.includes('no longer eligible')
+  );
+}
+
+/**
+ * After Automatic Handoff, start one peer per Open Demand task up to the Width Cap.
+ * The caller does not hold the run lock. Each admission takes it once around spawnSubagent.
+ */
+function fillOpenDemand(cwd: string, runId: string): void {
+  const run = readRun(cwd, runId);
+  if (!run?.demandFill || run.status !== 'active') return;
+  if (run.consumedSteps >= run.maxSteps) return;
+  if (run.acceptanceOwner && isProcessAlive(run.acceptanceOwner)) return;
+  for (const task of getAllTasks(cwd, runId)) {
+    let stop = false;
+    let suspendedNow = false;
+    updateRun(cwd, runId, (current) => {
+      if (!current.demandFill || current.status !== 'active') return void (stop = true);
+      if (current.consumedSteps >= current.maxSteps) return void (stop = true);
+      if (current.acceptanceOwner && isProcessAlive(current.acceptanceOwner))
+        return void (stop = true);
+      const width = computeWidth(cwd, current);
+      if (width.live >= width.cap) return void (stop = true);
+      // A bound peer, including one awaiting Automatic Handoff, is not Open Demand.
+      if (
+        listSpawned(cwd, runId, true).some((peer) => peer.taskId === task.id && !peer.stopRequested)
+      )
+        return;
+      if (claimableRejection(cwd, current, task.id)) return;
+      const handoff: HandoffState = (current.handoffs[task.id] ||= { failures: 0, errors: [] });
+      if (handoff.suspended) return;
+      const spec = getTaskSpec(cwd, runId, task.id);
+      try {
+        const peer = spawnSubagent(
+          cwd,
+          {
+            role: task.title,
+            objective: spec?.trim() || task.title,
+            taskId: task.id,
+          },
+          runId,
+          ensureSessionChannel(messengerDirs(cwd), runId).id
+        );
+        handoff.successor = peer.id;
+        handoff.startedAt = peer.startedAt;
+        handoff.takenOver = false;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (isDeferredAdmission(message)) {
+          if (stopsFill(message)) stop = true;
+          return;
+        }
+        handoff.failures++;
+        handoff.errors.push(message);
+        if (handoff.failures >= 3) {
+          handoff.suspended = true;
+          suspendedNow = true;
+        }
+      }
+    });
+    // No peer record exists, so the handoff loop will not see this suspension.
+    // Notify outside the run lock; enqueueCritical takes it itself.
+    if (suspendedNow) {
+      const current = readRun(cwd, runId);
+      const handoff = current?.handoffs[task.id];
+      if (current && handoff?.suspended)
+        notify(
+          cwd,
+          runId,
+          current.delegator,
+          `suspended-${task.id}-${handoff.errors.length}`,
+          `Automatic Handoff suspended for ${task.id} after three startup/takeover failures. Verification attempts unchanged.\n${handoff.errors.join('\n')}\nRepair the environment and use handoff resume ${task.id}.`,
+          task.id
+        );
+    }
+    if (stop) return;
+  }
+}
 
 function notify(cwd: string, runId: string, to: string, id: string, text: string, taskId?: string) {
   enqueueCritical(
@@ -222,6 +307,9 @@ export function recoverRun(cwd: string): void {
     });
     peers = listSpawned(cwd, run.id, true);
   }
+  // Handoff owns a freed slot before any new task is admitted.
+  fillOpenDemand(cwd, run.id);
+  peers = listSpawned(cwd, run.id, true);
   const remaining = peers.filter(live);
   if (
     !remaining.length &&

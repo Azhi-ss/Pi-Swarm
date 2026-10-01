@@ -24,6 +24,8 @@ export interface SwarmRun {
   maxSteps: number;
   consumedSteps: number;
   concurrency: number;
+  /** Set only at run start. Absent on older records, which means off. */
+  demandFill?: boolean;
   stopReason?: string;
   acceptanceCommand?: string;
   acceptanceOwner?: number;
@@ -130,6 +132,7 @@ export function startRun(
     maxSteps?: number;
     concurrency?: number;
     acceptanceCommand?: string;
+    demandFill?: boolean;
   }
 ): SwarmRun {
   return withRunLock(cwd, () => {
@@ -159,6 +162,7 @@ export function startRun(
       maxSteps,
       consumedSteps: 0,
       concurrency,
+      demandFill: input.demandFill === true,
       acceptanceCommand: input.acceptanceCommand,
       handoffs: {},
     };

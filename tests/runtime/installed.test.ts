@@ -3559,3 +3559,996 @@ it('reaps one project without stopping a successor, another project, or a host p
     await new Promise<void>((resolve) => provider.close(() => resolve()));
   }
 }, 90_000);
+
+function useFixtureModel() {
+  const dir = env.PI_CODING_AGENT_DIR!;
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, 'settings.json');
+  let current: Record<string, unknown> = {};
+  try {
+    current = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    /* first run has no settings yet */
+  }
+  fs.writeFileSync(
+    file,
+    JSON.stringify({ ...current, defaultProvider: 'fixture', defaultModel: 'fixture' })
+  );
+}
+function liveBound(runId: string) {
+  try {
+    return spawnedPids(runId).filter((peer) => peer.pid && pidAlive(peer.pid));
+  } catch {
+    return [];
+  }
+}
+function spawnsFor(runId: string, taskId: string) {
+  try {
+    return spawnedPids(runId).filter((peer) => peer.taskId === taskId);
+  } catch {
+    return [];
+  }
+}
+const assignedTask = (raw: string) => raw.match(/task claim (task-\d+)/)?.[1];
+function closeProvider(provider: import('node:http').Server) {
+  provider.closeAllConnections();
+  return new Promise<void>((resolve) => provider.close(() => resolve()));
+}
+
+it('Demand Fill: run start persists the switch and a default run shows Fill off', async () => {
+  await command('abort').catch(() => {});
+  const off = JSON.parse((await command('run', 'start', '--goal', 'Fill stays off')).stdout);
+  expect(off.demandFill).toBe(false);
+  expect((await runStatus()).width.fill).toBe('off');
+  await vi.waitFor(() => expect(board()).toContain('Fill: off'));
+  expect((await command('status')).stdout).toContain('Fill: off');
+  await command('abort');
+
+  const on = JSON.parse(
+    (await command('run', 'start', '--goal', 'Fill is on', '--demand-fill')).stdout
+  );
+  expect(on.demandFill).toBe(true);
+  expect((await runStatus()).width).toMatchObject({ fill: 'on', live: 0 });
+  await vi.waitFor(() => expect(board()).toContain('Fill: on'));
+  expect((await command('status')).stdout).toContain('Fill: on');
+  expect(spawnedEventCount(on.id)).toBe(0);
+  await command('abort');
+}, 20_000);
+
+it('Demand Fill: a default run does not spawn peers and explicit spawn still admits one Claimable Task', async () => {
+  await command('abort').catch(() => {});
+  const provider = createHttpServer(async (req) => {
+    for await (const _chunk of req) {
+      /* keep the explicit peer alive */
+    }
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  try {
+    setHostWidthCap(4);
+    const started = JSON.parse(
+      (await command('run', 'start', '--goal', 'No automatic fill', '--concurrency', '4')).stdout
+    );
+    expect(started.demandFill).toBe(false);
+    await command('run', 'join');
+    await command('task', 'create', '--title', 'Waiting for an explicit spawn');
+    await command('task', 'create', '--title', 'Still waiting');
+    await sleep(2000);
+    expect(spawnedEventCount(started.id)).toBe(0);
+    expect((await runStatus()).width).toMatchObject({ live: 0, fill: 'off', openDemand: 2 });
+    await command(
+      'spawn',
+      '--task-id',
+      'task-1',
+      '--model',
+      'fixture/fixture',
+      'Hold the explicit peer'
+    );
+    expect(spawnedEventCount(started.id)).toBe(1);
+    expect(liveBound(started.id).map((peer) => peer.taskId)).toEqual(['task-1']);
+    await expect(command('spawn', '--force', 'Unbound worker')).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining('not bound to a Claimable Task'),
+    });
+    expect(spawnedEventCount(started.id)).toBe(1);
+    expect((await runStatus()).consumedSteps).toBe(started.consumedSteps);
+  } finally {
+    await command('abort').catch(() => {});
+    fs.rmSync(hostConfig(), { force: true });
+    await closeProvider(provider);
+  }
+}, 30_000);
+
+it('Demand Fill: fills four of six tasks and refills a fifth after one is verified', async () => {
+  await command('abort').catch(() => {});
+  const finishDir = path.join(root, 'fill-finish');
+  fs.rmSync(finishDir, { recursive: true, force: true });
+  fs.mkdirSync(finishDir);
+  const provider = createHttpServer(async (req, res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    const task = assignedTask(raw);
+    if (!task) return writeTurn(res, [say('READY')]);
+    const finish = sh(path.join(finishDir, task));
+    writeTurn(res, [
+      bash(
+        `claim_${task}`,
+        `pi-messenger-swarm run join && pi-messenger-swarm task claim ${task} && echo CLAIMED_${task} && while [ ! -f ${finish} ]; do sleep 0.2; done && pi-messenger-swarm task done ${task} verified --verify 'node -e "process.exit(0)"' && kill -KILL "$PI_SWARM_PEER_PID"`,
+        180
+      ),
+    ]);
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  useFixtureModel();
+  let maxLive = 0;
+  let consumed = 0;
+  try {
+    setHostWidthCap(6);
+    const started = JSON.parse(
+      (
+        await command(
+          'run',
+          'start',
+          '--goal',
+          'Fill the width',
+          '--demand-fill',
+          '--concurrency',
+          '4'
+        )
+      ).stdout
+    );
+    expect(started).toMatchObject({ demandFill: true, concurrency: 4 });
+    const maxSteps = started.maxSteps;
+    await command('run', 'join');
+    for (let i = 1; i <= 6; i++) await command('task', 'create', '--title', `Independent ${i}`);
+    await command('task', 'create', '--title', 'Blocked until task-6', '--depends-on', 'task-6');
+    await vi.waitFor(
+      async () => {
+        const status = await runStatus();
+        expect(status.maxSteps).toBe(maxSteps);
+        expect(status.consumedSteps).toBeGreaterThanOrEqual(consumed);
+        consumed = status.consumedSteps;
+        const live = liveBound(started.id);
+        maxLive = Math.max(maxLive, live.length);
+        expect(maxLive).toBeLessThanOrEqual(4);
+        expect(status.width).toMatchObject({
+          live: 4,
+          cap: 4,
+          openDemand: 2,
+          idle: 0,
+          fill: 'on',
+          limiter: 'run-cap',
+        });
+        expect(live.map((peer) => peer.taskId).sort()).toEqual([
+          'task-1',
+          'task-2',
+          'task-3',
+          'task-4',
+        ]);
+      },
+      { timeout: 45_000, interval: 300 }
+    );
+    expect(maxLive).toBeLessThanOrEqual(4);
+    expect(board()).toMatch(
+      /^> Width: 4\/4 \(run 4, host 6, budget \d+\) \| Open Demand: 2 \| Idle: 0 \| Fill: on \| Limited by: run-cap$/m
+    );
+    for (const id of ['task-1', 'task-2', 'task-3', 'task-4']) {
+      const show = (await command('task', 'show', id)).stdout;
+      expect(show).toContain('Status: in_progress');
+      expect(show).not.toContain('Claimed by: (none)');
+    }
+    expect(spawnsFor(started.id, 'task-7')).toHaveLength(0);
+    expect((await command('task', 'show', 'task-7')).stdout).toContain('Status: todo');
+
+    fs.writeFileSync(path.join(finishDir, 'task-1'), 'go');
+    await vi.waitFor(
+      async () => {
+        const status = await runStatus();
+        expect(status.maxSteps).toBe(maxSteps);
+        expect(status.consumedSteps).toBeGreaterThanOrEqual(consumed);
+        consumed = status.consumedSteps;
+        const live = liveBound(started.id);
+        maxLive = Math.max(maxLive, live.length);
+        expect(maxLive).toBeLessThanOrEqual(4);
+        expect((await command('task', 'show', 'task-1')).stdout).toContain('Status: verified');
+        expect(live).toHaveLength(4);
+        expect(live.map((peer) => peer.taskId)).toContain('task-5');
+        expect((await command('task', 'show', 'task-5')).stdout).toContain('Status: in_progress');
+        expect(spawnsFor(started.id, 'task-7')).toHaveLength(0);
+      },
+      { timeout: 30_000, interval: 300 }
+    );
+    expect(maxLive).toBeLessThanOrEqual(4);
+    const distinct = new Set(spawnedPids(started.id).map((peer) => peer.taskId));
+    expect([...distinct].sort()).toEqual(['task-1', 'task-2', 'task-3', 'task-4', 'task-5']);
+  } finally {
+    await command('abort').catch(() => {});
+    fs.rmSync(hostConfig(), { force: true });
+    await closeProvider(provider);
+  }
+}, 90_000);
+
+it('Demand Fill: does not collapse below the Claimable Tasks that fit in the cap', async () => {
+  await command('abort').catch(() => {});
+  const provider = createHttpServer(async (req, res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    const task = assignedTask(raw);
+    if (!task) return writeTurn(res, [say('READY')]);
+    writeTurn(res, [
+      bash(
+        `claim_${task}`,
+        `pi-messenger-swarm run join && pi-messenger-swarm task claim ${task} && echo CLAIMED_${task} && sleep 90`,
+        120
+      ),
+    ]);
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  useFixtureModel();
+  let sawDemandWhileOpen = false;
+  try {
+    setHostWidthCap(6);
+    const started = JSON.parse(
+      (
+        await command(
+          'run',
+          'start',
+          '--goal',
+          'No serial collapse',
+          '--demand-fill',
+          '--concurrency',
+          '3'
+        )
+      ).stdout
+    );
+    await command('run', 'join');
+    for (let i = 1; i <= 3; i++) await command('task', 'create', '--title', `Parallel ${i}`);
+    await command('task', 'create', '--title', 'Not claimable yet', '--depends-on', 'task-1');
+    await vi.waitFor(
+      async () => {
+        const width = (await runStatus()).width;
+        if (width.openDemand > 0 && width.limiter === 'demand') sawDemandWhileOpen = true;
+        expect(sawDemandWhileOpen).toBe(false);
+        expect(width).toMatchObject({ live: 3, cap: 3, idle: 0, openDemand: 0, fill: 'on' });
+      },
+      { timeout: 40_000, interval: 200 }
+    );
+    expect(
+      liveBound(started.id)
+        .map((peer) => peer.taskId)
+        .sort()
+    ).toEqual(['task-1', 'task-2', 'task-3']);
+    expect(spawnsFor(started.id, 'task-4')).toHaveLength(0);
+    expect((await command('task', 'show', 'task-4')).stdout).toContain('Status: todo');
+    expect((await command('task', 'show', 'task-4')).stdout).toContain('Depends on: task-1');
+  } finally {
+    await command('abort').catch(() => {});
+    fs.rmSync(hostConfig(), { force: true });
+    await closeProvider(provider);
+  }
+}, 50_000);
+
+it('Demand Fill: explicit spawn and fill see a Host Width Cap change at the next admission', async () => {
+  await command('abort').catch(() => {});
+  const provider = createHttpServer(async (req) => {
+    for await (const _chunk of req) {
+      /* keep admitted peers alive without claiming */
+    }
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  useFixtureModel();
+  let maxLive = 0;
+  try {
+    setHostWidthCap(2);
+    const started = JSON.parse(
+      (
+        await command(
+          'run',
+          'start',
+          '--goal',
+          'Same host cap',
+          '--demand-fill',
+          '--concurrency',
+          '5'
+        )
+      ).stdout
+    );
+    const maxSteps = started.maxSteps;
+    await command('run', 'join');
+    for (let i = 1; i <= 5; i++) await command('task', 'create', '--title', `Capped ${i}`);
+    await vi.waitFor(
+      async () => {
+        const live = liveBound(started.id);
+        maxLive = Math.max(maxLive, live.length);
+        expect(maxLive).toBeLessThanOrEqual(2);
+        expect((await runStatus()).width).toMatchObject({
+          live: 2,
+          cap: 2,
+          host: 2,
+          fill: 'on',
+          limiter: 'host-cap',
+        });
+      },
+      { timeout: 20_000, interval: 200 }
+    );
+    await expect(
+      command('spawn', '--task-id', 'task-5', '--model', 'fixture/fixture', 'Explicit at host 2')
+    ).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining('Limited by: host-cap'),
+    });
+    expect(liveBound(started.id)).toHaveLength(2);
+    expect((await runStatus()).handoffs['task-5']?.failures ?? 0).toBe(0);
+
+    setHostWidthCap(4);
+    await vi.waitFor(
+      async () => {
+        const status = await runStatus();
+        const live = liveBound(started.id);
+        maxLive = Math.max(maxLive, live.length);
+        expect(maxLive).toBeLessThanOrEqual(4);
+        expect(status).toMatchObject({ concurrency: 5, maxSteps });
+        expect(status.width).toMatchObject({ live: 4, cap: 4, host: 4, fill: 'on' });
+        expect(live.map((peer) => peer.taskId).sort()).toEqual([
+          'task-1',
+          'task-2',
+          'task-3',
+          'task-4',
+        ]);
+      },
+      { timeout: 20_000, interval: 200 }
+    );
+    await expect(
+      command('spawn', '--task-id', 'task-5', '--model', 'fixture/fixture', 'Explicit at host 4')
+    ).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining('Limited by: host-cap'),
+    });
+    expect(maxLive).toBeLessThanOrEqual(4);
+    expect(spawnsFor(started.id, 'task-5')).toHaveLength(0);
+    expect((await runStatus()).handoffs['task-5']?.failures ?? 0).toBe(0);
+  } finally {
+    await command('abort').catch(() => {});
+    fs.rmSync(hostConfig(), { force: true });
+    await closeProvider(provider);
+  }
+}, 50_000);
+
+it('Demand Fill: handoff successor takes a freed slot before a new task', async () => {
+  await command('abort').catch(() => {});
+  const provider = createHttpServer(async (req, res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    const task = assignedTask(raw);
+    if (!task) return writeTurn(res, [say('READY')]);
+    const shell = raw.includes('Automatic Handoff')
+      ? `pi-messenger-swarm run join && pi-messenger-swarm task claim ${task} && echo SUCCESSOR_${task} && sleep 90`
+      : `pi-messenger-swarm run join && pi-messenger-swarm task claim ${task} && echo CLAIMED_${task} && sleep 90`;
+    writeTurn(res, [bash(`hold_${task}`, shell, 120)]);
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  useFixtureModel();
+  let maxLive = 0;
+  try {
+    setHostWidthCap(4);
+    const started = JSON.parse(
+      (
+        await command(
+          'run',
+          'start',
+          '--goal',
+          'Handoff before fill',
+          '--demand-fill',
+          '--concurrency',
+          '2'
+        )
+      ).stdout
+    );
+    await command('run', 'join');
+    for (let i = 1; i <= 3; i++) await command('task', 'create', '--title', `Handoff ${i}`);
+    await vi.waitFor(
+      async () => {
+        const live = liveBound(started.id);
+        maxLive = Math.max(maxLive, live.length);
+        expect(maxLive).toBeLessThanOrEqual(2);
+        expect((await runStatus()).width).toMatchObject({ live: 2, cap: 2, fill: 'on' });
+        expect((await command('task', 'show', 'task-1')).stdout).toContain('Status: in_progress');
+        expect((await command('task', 'show', 'task-2')).stdout).toContain('Status: in_progress');
+      },
+      { timeout: 30_000, interval: 250 }
+    );
+    expect(spawnsFor(started.id, 'task-3')).toHaveLength(0);
+    expect((await runStatus()).handoffs['task-3']?.failures ?? 0).toBe(0);
+    const victim = liveBound(started.id).find((peer) => peer.taskId === 'task-1')!;
+    expect(pidAlive(victim.pid)).toBe(true);
+    process.kill(victim.pid, 'SIGKILL');
+    await vi.waitFor(
+      async () => {
+        const status = await runStatus();
+        const live = liveBound(started.id);
+        maxLive = Math.max(maxLive, live.length);
+        expect(maxLive).toBeLessThanOrEqual(2);
+        expect(live).toHaveLength(2);
+        expect(status.handoffs['task-1']).toMatchObject({ failures: 0 });
+        expect(status.handoffs['task-1'].successor).toBeTruthy();
+        expect(live.find((peer) => peer.taskId === 'task-1')!.pid).not.toBe(victim.pid);
+        expect(live.map((peer) => peer.taskId).sort()).toEqual(['task-1', 'task-2']);
+        expect(spawnsFor(started.id, 'task-3')).toHaveLength(0);
+        expect(status.handoffs['task-3']?.failures ?? 0).toBe(0);
+      },
+      { timeout: 20_000, interval: 200 }
+    );
+    expect(maxLive).toBeLessThanOrEqual(2);
+  } finally {
+    await command('abort').catch(() => {});
+    fs.rmSync(hostConfig(), { force: true });
+    await closeProvider(provider);
+  }
+}, 60_000);
+
+it('Demand Fill: three startup failures suspend the task and another task still starts', async () => {
+  await command('abort').catch(() => {});
+  const requests: string[] = [];
+  const provider = createHttpServer(async (req, res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    requests.push(raw);
+    if (assignedTask(raw)) {
+      const task = assignedTask(raw)!;
+      return writeTurn(res, [
+        bash(
+          `claim_${task}`,
+          `pi-messenger-swarm run join && pi-messenger-swarm task claim ${task} && echo CLAIMED_${task} && sleep 90`,
+          120
+        ),
+      ]);
+    }
+    const messages: Message[] = JSON.parse(raw).messages;
+    writeTurn(res, [
+      say(
+        unanswered(messages, 'Automatic Handoff suspended', 'HANDLED_SUSPENSION')
+          ? 'HANDLED_SUSPENSION'
+          : 'READY'
+      ),
+    ]);
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  useFixtureModel();
+  const savedPath = env.PATH!;
+  const emptyBin = path.join(root, 'fill-no-pi');
+  fs.rmSync(emptyBin, { recursive: true, force: true });
+  fs.mkdirSync(emptyBin);
+  fs.symlinkSync(process.execPath, path.join(emptyBin, 'node'));
+  for (const bin of ['git', 'env']) {
+    const found = ['/usr/bin', '/bin']
+      .map((dir) => path.join(dir, bin))
+      .find((p) => fs.existsSync(p));
+    if (found) fs.symlinkSync(found, path.join(emptyBin, bin));
+  }
+  const restartService = async () => {
+    await command('--stop').catch(() => {});
+    await vi.waitFor(
+      async () => {
+        const up = await fetch(`http://127.0.0.1:${port}/health`)
+          .then((response) => response.ok)
+          .catch(() => false);
+        expect(up).toBe(false);
+      },
+      { timeout: 5_000 }
+    );
+    await command('--start');
+  };
+  env.PATH = emptyBin;
+  await restartService();
+  const delegator = startPi(project, { ...env, PATH: savedPath });
+  recordPid(delegator.pid);
+  const asDelegator = (...args: string[]) =>
+    exec(process.execPath, [cli, ...args], {
+      cwd: project,
+      env: {
+        ...env,
+        PATH: savedPath,
+        PI_AGENT_NAME: 'Delegator',
+        PI_SWARM_PEER_PID: String(process.pid),
+      },
+      timeout: 20_000,
+    });
+  try {
+    delegator.prompt('ready');
+    await vi.waitFor(
+      () => expect(delegator.output.includes('READY'), delegator.output.slice(-1500)).toBe(true),
+      { timeout: 15_000 }
+    );
+    const started = JSON.parse(
+      (
+        await asDelegator(
+          'run',
+          'start',
+          '--goal',
+          'Startup cannot begin',
+          '--demand-fill',
+          '--concurrency',
+          '4',
+          '--max-steps',
+          '40'
+        )
+      ).stdout
+    );
+    await asDelegator('run', 'join');
+    await asDelegator('task', 'create', '--title', 'Cannot start');
+    await vi.waitFor(
+      async () => {
+        const state = JSON.parse((await asDelegator('run', 'status')).stdout);
+        expect(state.handoffs['task-1']).toMatchObject({ failures: 3, suspended: true });
+        expect(state.handoffs['task-1'].errors.join('\n')).toContain(
+          'Peer process failed to start'
+        );
+        expect(spawnedEventCount(started.id)).toBe(0);
+      },
+      { timeout: 20_000, interval: 300 }
+    );
+    await vi.waitFor(
+      () =>
+        expect(replies(delegator.output, 'HANDLED_SUSPENSION'), delegator.output.slice(-2000)).toBe(
+          1
+        ),
+      { timeout: 15_000 }
+    );
+    expect(
+      requests.some(
+        (raw) =>
+          raw.includes('Automatic Handoff suspended') &&
+          raw.includes('Verification attempts unchanged')
+      )
+    ).toBe(true);
+    const notes = JSON.parse((await asDelegator('notifications')).stdout);
+    expect(notes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ to: 'Delegator', taskId: 'task-1', status: 'handled' }),
+      ])
+    );
+    env.PATH = savedPath;
+    await restartService();
+    await sleep(2000);
+    const suspended = JSON.parse((await asDelegator('run', 'status')).stdout);
+    expect(suspended.handoffs['task-1']).toMatchObject({ failures: 3, suspended: true });
+    expect(suspended.maxSteps).toBe(40);
+    expect(suspended.consumedSteps).toBe(0);
+    expect(spawnedEventCount(started.id)).toBe(0);
+    expect((await asDelegator('task', 'show', 'task-1')).stdout).toContain(
+      'Verification attempts: 0'
+    );
+    await asDelegator('task', 'create', '--title', 'Other work proceeds');
+    await vi.waitFor(
+      async () => {
+        expect((await asDelegator('task', 'show', 'task-2')).stdout).toContain(
+          'Status: in_progress'
+        );
+        expect(liveBound(started.id).map((peer) => peer.taskId)).toEqual(['task-2']);
+      },
+      { timeout: 20_000, interval: 300 }
+    );
+    expect(
+      JSON.parse((await asDelegator('run', 'status')).stdout).handoffs['task-1']
+    ).toMatchObject({ failures: 3, suspended: true });
+    expect(spawnsFor(started.id, 'task-1')).toHaveLength(0);
+    expect((await asDelegator('task', 'show', 'task-2')).stdout).toContain(
+      'Verification attempts: 0'
+    );
+  } finally {
+    env.PATH = savedPath;
+    await delegator.stop();
+    await command('abort').catch(() => {});
+    await restartService().catch(() => {});
+    await closeProvider(provider);
+  }
+}, 90_000);
+
+it('Demand Fill: a peer that does not claim within 30 seconds is stopped and counted', async () => {
+  await command('abort').catch(() => {});
+  const provider = createHttpServer(async (req, res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    const task = assignedTask(raw);
+    if (task === 'task-1')
+      return writeTurn(res, [bash('idle', 'echo "IDLE_$PI_AGENT_NAME" && sleep 90', 120)]);
+    if (task)
+      return writeTurn(res, [
+        bash(
+          'claim',
+          `pi-messenger-swarm run join && pi-messenger-swarm task claim ${task} && echo CLAIMED_${task} && sleep 90`,
+          120
+        ),
+      ]);
+    writeTurn(res, [say('READY')]);
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  useFixtureModel();
+  try {
+    setHostWidthCap(4);
+    const started = JSON.parse(
+      (
+        await command(
+          'run',
+          'start',
+          '--goal',
+          'Claim deadline',
+          '--demand-fill',
+          '--concurrency',
+          '2',
+          '--max-steps',
+          '40'
+        )
+      ).stdout
+    );
+    await command('run', 'join');
+    await command('task', 'create', '--title', 'Never claims');
+    await command('task', 'create', '--title', 'Claims promptly');
+    let idleId = '';
+    await vi.waitFor(
+      async () => {
+        const status = await runStatus();
+        idleId = status.handoffs['task-1']?.successor;
+        expect(idleId).toBeTruthy();
+        expect(
+          liveBound(started.id)
+            .map((peer) => peer.taskId)
+            .sort()
+        ).toEqual(['task-1', 'task-2']);
+        expect((await command('ps', 'logs', idleId)).stdout).toMatch(/IDLE_\w/);
+        expect((await command('task', 'show', 'task-2')).stdout).toContain('Status: in_progress');
+      },
+      { timeout: 25_000, interval: 300 }
+    );
+    const idlePid = spawnedPids(started.id).find((peer) => peer.taskId === 'task-1')!.pid;
+    await vi.waitFor(
+      async () => {
+        const handoff = JSON.parse((await command('run', 'status')).stdout).handoffs['task-1'];
+        expect(handoff.failures).toBe(1);
+        expect(handoff.errors[0]).toContain('Takeover timed out');
+        expect(handoff.suspended).not.toBe(true);
+        expect(pidAlive(idlePid)).toBe(false);
+      },
+      { timeout: 45_000, interval: 500 }
+    );
+    expect((await command('task', 'show', 'task-1')).stdout).toContain('Verification attempts: 0');
+    expect((await command('task', 'show', 'task-2')).stdout).toContain('Status: in_progress');
+    expect((await command('task', 'show', 'task-2')).stdout).toContain('Verification attempts: 0');
+    expect(JSON.parse((await command('run', 'status')).stdout).maxSteps).toBe(40);
+  } finally {
+    await command('abort').catch(() => {});
+    fs.rmSync(hostConfig(), { force: true });
+    await closeProvider(provider);
+  }
+}, 80_000);
+
+it('Demand Fill: Project Y fills while Project X is at its cap', async () => {
+  await command('abort').catch(() => {});
+  const provider = createHttpServer(async (req) => {
+    for await (const _chunk of req) {
+      /* keep both projects' peers alive */
+    }
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  useFixtureModel();
+  const isolated = path.join(root, 'fill-project-y');
+  fs.rmSync(isolated, { recursive: true, force: true });
+  fs.mkdirSync(isolated);
+  const iso = (...args: string[]) => run(process.execPath, [cli, ...args], isolated);
+  try {
+    setHostWidthCap(1);
+    const started = JSON.parse(
+      (
+        await command(
+          'run',
+          'start',
+          '--goal',
+          'Project X is full',
+          '--demand-fill',
+          '--concurrency',
+          '1'
+        )
+      ).stdout
+    );
+    await command('run', 'join');
+    await command('task', 'create', '--title', 'X first');
+    await command('task', 'create', '--title', 'X waiting');
+    await vi.waitFor(async () => expect((await runStatus()).width.live).toBe(1), {
+      timeout: 20_000,
+    });
+    await run('git', ['init'], isolated);
+    await run(
+      'git',
+      [
+        '-c',
+        'user.email=t@example.test',
+        '-c',
+        'user.name=T',
+        'commit',
+        '--allow-empty',
+        '-m',
+        'i',
+      ],
+      isolated
+    );
+    const other = JSON.parse(
+      (
+        await iso(
+          'run',
+          'start',
+          '--goal',
+          'Project Y fills',
+          '--demand-fill',
+          '--concurrency',
+          '1'
+        )
+      ).stdout
+    );
+    expect(other.demandFill).toBe(true);
+    await iso('run', 'join');
+    await iso('task', 'create', '--title', 'Y only task');
+    await vi.waitFor(
+      async () => {
+        expect(JSON.parse((await iso('run', 'status')).stdout).width).toMatchObject({
+          live: 1,
+          fill: 'on',
+        });
+        expect((await runStatus()).width).toMatchObject({ live: 1, cap: 1, fill: 'on' });
+      },
+      { timeout: 20_000, interval: 250 }
+    );
+    expect(liveBound(started.id)).toHaveLength(1);
+    expect(spawnsFor(started.id, 'task-2')).toHaveLength(0);
+    const yEvents = path.join(isolated, '.pi/messenger/agents', `${other.id}.jsonl`);
+    expect(fs.readFileSync(yEvents, 'utf8')).toContain('"type":"spawned"');
+  } finally {
+    await command('abort').catch(() => {});
+    await iso('abort').catch(() => {});
+    fs.rmSync(hostConfig(), { force: true });
+    await closeProvider(provider);
+  }
+}, 40_000);
+
+it('Demand Fill: does not fill while stopped, out of budget, or during acceptance', async () => {
+  await command('abort').catch(() => {});
+  let calls = 0;
+  const provider = createHttpServer(async (req, res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    if (raw.includes('Burn steps')) return writeToolTurn(res, `burn_${++calls}`, 'true');
+    if (raw.includes('Acceptance prerequisite') || raw.includes('Archive me')) {
+      const task = assignedTask(raw) ?? 'task-1';
+      return writeTurn(res, [
+        bash(
+          'finish',
+          `pi-messenger-swarm run join && pi-messenger-swarm task claim ${task} && pi-messenger-swarm task done ${task} verified --verify 'node -e "process.exit(0)"' && kill -KILL "$PI_SWARM_PEER_PID"`,
+          60
+        ),
+      ]);
+    }
+    writeTurn(res, [bash('hold', 'sleep 90', 120)]);
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  useFixtureModel();
+  const marker = path.join(project, '.pi', 'fill-acceptance');
+  try {
+    setHostWidthCap(6);
+    const budget = JSON.parse(
+      (
+        await command(
+          'run',
+          'start',
+          '--goal',
+          'Budget stops fill',
+          '--demand-fill',
+          '--max-steps',
+          '5',
+          '--concurrency',
+          '6'
+        )
+      ).stdout
+    );
+    expect(budget).toMatchObject({ maxSteps: 5, demandFill: true });
+    await command('run', 'join');
+    await command('task', 'create', '--title', 'Burn steps');
+    await command('task', 'create', '--title', 'Burn steps later');
+    let consumed = 0;
+    await vi.waitFor(
+      async () => {
+        const record = JSON.parse((await command('run', 'show', budget.id)).stdout);
+        expect(record.maxSteps).toBe(5);
+        expect(record.consumedSteps).toBeGreaterThanOrEqual(consumed);
+        consumed = record.consumedSteps;
+        expect(record.status).toBe('aborted');
+      },
+      { timeout: 30_000, interval: 200 }
+    );
+    expect(spawnedEventCount(budget.id)).toBe(1);
+    expect(spawnsFor(budget.id, 'task-2')).toHaveLength(0);
+    const exhausted = JSON.parse((await command('run', 'show', budget.id)).stdout);
+    await sleep(1500);
+    const afterBudget = JSON.parse((await command('run', 'show', budget.id)).stdout);
+    expect(afterBudget.consumedSteps).toBeGreaterThanOrEqual(exhausted.consumedSteps);
+    expect(afterBudget.maxSteps).toBe(5);
+    expect(spawnedEventCount(budget.id)).toBe(1);
+    expect(afterBudget.handoffs['task-2']?.failures ?? 0).toBe(0);
+
+    setHostWidthCap(1);
+    const aborted = JSON.parse(
+      (
+        await command(
+          'run',
+          'start',
+          '--goal',
+          'Abort stops fill',
+          '--demand-fill',
+          '--concurrency',
+          '2'
+        )
+      ).stdout
+    );
+    await command('run', 'join');
+    await command('task', 'create', '--title', 'Stay running');
+    await command('task', 'create', '--title', 'Stay waiting');
+    await vi.waitFor(async () => expect(liveBound(aborted.id)).toHaveLength(1), {
+      timeout: 20_000,
+    });
+    const running = spawnedEventCount(aborted.id);
+    await command('abort');
+    await sleep(1500);
+    expect(JSON.parse((await command('run', 'show', aborted.id)).stdout).status).toBe('aborted');
+    expect(spawnedEventCount(aborted.id)).toBe(running);
+    expect(spawnsFor(aborted.id, 'task-2')).toHaveLength(0);
+
+    fs.rmSync(marker, { force: true });
+    setHostWidthCap(4);
+    const acceptance = `node -e "require('fs').mkdirSync('.pi',{recursive:true});require('fs').writeFileSync('.pi/fill-acceptance','yes');setTimeout(()=>{},8000)"`;
+    const accepting = JSON.parse(
+      (
+        await command(
+          'run',
+          'start',
+          '--goal',
+          'Acceptance pauses fill',
+          '--demand-fill',
+          '--concurrency',
+          '4',
+          '--verify',
+          acceptance
+        )
+      ).stdout
+    );
+    await command('run', 'join');
+    await command('task', 'create', '--title', 'Acceptance prerequisite');
+    await vi.waitFor(() => expect(fs.existsSync(marker)).toBe(true), { timeout: 30_000 });
+    expect((await runStatus()).acceptanceOwner).toBeTruthy();
+    const during = spawnedEventCount(accepting.id);
+    await command('task', 'create', '--title', 'During acceptance');
+    await expect(
+      command('spawn', '--task-id', 'task-2', '--model', 'fixture/fixture', 'During acceptance')
+    ).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining('Overall Goal Acceptance is running'),
+    });
+    for (const deadline = Date.now() + 2000; Date.now() < deadline; ) {
+      expect(spawnedEventCount(accepting.id)).toBe(during);
+      expect(spawnsFor(accepting.id, 'task-2')).toHaveLength(0);
+      expect((await runStatus()).maxSteps).toBe(accepting.maxSteps);
+      await sleep(200);
+    }
+
+    await command('abort').catch(() => {});
+    const archived = JSON.parse(
+      (
+        await command(
+          'run',
+          'start',
+          '--goal',
+          'Archive stops fill',
+          '--demand-fill',
+          '--concurrency',
+          '1',
+          '--verify',
+          'node -e "process.exit(0)"'
+        )
+      ).stdout
+    );
+    await command('run', 'join');
+    await command('task', 'create', '--title', 'Archive me');
+    await vi.waitFor(
+      async () =>
+        expect(JSON.parse((await command('run', 'show', archived.id)).stdout).status).toBe(
+          'completed'
+        ),
+      { timeout: 30_000, interval: 300 }
+    );
+    const archivedSpawns = spawnedEventCount(archived.id);
+    await sleep(1500);
+    expect(JSON.parse((await command('run', 'show', archived.id)).stdout).status).toBe('completed');
+    expect(spawnedEventCount(archived.id)).toBe(archivedSpawns);
+    expect((await runStatus()).phase).toBe('No active run');
+  } finally {
+    await command('abort').catch(() => {});
+    fs.rmSync(hostConfig(), { force: true });
+    fs.rmSync(marker, { force: true });
+    await closeProvider(provider);
+  }
+}, 90_000);
+
+it('Demand Fill: two services stay within the cap and never double-start a task', async () => {
+  await command('abort').catch(() => {});
+  const provider = createHttpServer(async (req) => {
+    for await (const _chunk of req) {
+      /* keep raced peers alive */
+    }
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  useFixtureModel();
+  const second = await secondService();
+  let maxLive = 0;
+  let doubled = false;
+  try {
+    setHostWidthCap(2);
+    await command('--start');
+    await second('--start');
+    const started = JSON.parse(
+      (
+        await command(
+          'run',
+          'start',
+          '--goal',
+          'Two services fill',
+          '--demand-fill',
+          '--concurrency',
+          '2'
+        )
+      ).stdout
+    );
+    await command('run', 'join');
+    await second('run', 'join');
+    for (let i = 1; i <= 4; i++) await command('task', 'create', '--title', `Shared ${i}`);
+    await vi.waitFor(
+      async () => {
+        const live = liveBound(started.id);
+        maxLive = Math.max(maxLive, live.length);
+        const ids = live.map((peer) => peer.taskId);
+        if (new Set(ids).size !== ids.length) doubled = true;
+        expect(doubled).toBe(false);
+        expect(maxLive).toBeLessThanOrEqual(2);
+        expect(live).toHaveLength(2);
+        expect((await runStatus()).width).toMatchObject({ live: 2, cap: 2, fill: 'on' });
+      },
+      { timeout: 20_000, interval: 100 }
+    );
+    await sleep(1500);
+    const live = liveBound(started.id);
+    expect(live.length).toBeLessThanOrEqual(2);
+    expect(new Set(live.map((peer) => peer.taskId)).size).toBe(live.length);
+    expect(maxLive).toBeLessThanOrEqual(2);
+    expect(doubled).toBe(false);
+  } finally {
+    await command('abort').catch(() => {});
+    await second('--stop').catch(() => {});
+    fs.rmSync(hostConfig(), { force: true });
+    await closeProvider(provider);
+  }
+}, 40_000);

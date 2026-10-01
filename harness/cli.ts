@@ -450,7 +450,7 @@ async function main(): Promise<void> {
 
 Usage:
   pi-messenger-swarm [--project <path>] <command>
-  pi-messenger-swarm run start --goal "..." [--max-steps N] [--concurrency 1-50] [--verify "..."]
+  pi-messenger-swarm run start --goal "..." [--max-steps N] [--concurrency 1-50] [--demand-fill] [--verify "..."]
   pi-messenger-swarm run join | run status | run show <id> | run accept
   pi-messenger-swarm inbox | notifications
   pi-messenger-swarm candidate list [--task <id>]
@@ -636,6 +636,7 @@ Environment:
       const verify = extractFlag(args, 'verify');
       const maxSteps = extractFlag(args, 'max-steps');
       const concurrency = extractFlag(args, 'concurrency');
+      const demandFill = extractFlagBool(args, 'demand-fill');
       await postAction(
         buildAction({
           action: `run.${operation}`,
@@ -644,6 +645,7 @@ Environment:
           verify,
           maxSteps: maxSteps ? Number(maxSteps) : undefined,
           concurrency: concurrency ? Number(concurrency) : undefined,
+          ...(demandFill ? { demandFill: true } : {}),
         })
       );
       break;

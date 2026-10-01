@@ -29,7 +29,7 @@ export interface Width {
   budget?: number;
   openDemand: number;
   idle: number;
-  fill: 'off';
+  fill: 'on' | 'off';
   limiter: WidthLimiter;
 }
 
@@ -84,7 +84,7 @@ export function computeWidth(cwd: string, run: SwarmRun | undefined = readRun(cw
     budget,
     openDemand,
     idle: livePeers.filter((p) => !leased.has(p.name)).length,
-    fill: 'off',
+    fill: run.demandFill ? 'on' : 'off',
     limiter,
   };
 }

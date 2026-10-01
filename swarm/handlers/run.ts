@@ -40,6 +40,7 @@ export async function executeRun(
       delegator: name,
       maxSteps: params.maxSteps,
       concurrency: params.concurrency,
+      demandFill: params.demandFill,
       acceptanceCommand: params.verify,
     });
     writeBlackboard(cwd, run.id);

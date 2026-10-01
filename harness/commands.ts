@@ -27,7 +27,7 @@ export const COMMAND_REGISTRY: CommandSpec[] = [
     cmd: 'run start',
     action: 'run.start',
     description: 'Start the Project’s single active run',
-    flags: ['goal', 'verify', 'max-steps', 'concurrency'],
+    flags: ['goal', 'verify', 'max-steps', 'concurrency', 'demand-fill'],
   },
   { cmd: 'run join', action: 'run.join', description: 'Join the selected Project’s active run' },
   {

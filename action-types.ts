@@ -11,6 +11,7 @@ export interface MessengerActionParams {
   runId?: string;
   maxSteps?: number;
   concurrency?: number;
+  demandFill?: boolean;
 
   // Task IDs
   id?: string;
