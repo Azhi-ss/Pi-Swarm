@@ -33,6 +33,9 @@ import {
   clearSpawnStateForTests,
   getAgentEventHistory,
 } from '../../swarm/spawn.js';
+import { executeSpawn } from '../../swarm/handlers/spawn.js';
+import type { MessengerActionParams } from '../../action-types.js';
+import type { MessengerState } from '../../lib.js';
 
 class FakeProcess extends EventEmitter {
   stdout = new EventEmitter();
@@ -84,7 +87,12 @@ describe('cleanupExitedSpawned with event-sourced persistence', () => {
     const cwd = createTempCwd();
     const sessionId = 'test-session-1';
     const proc = new FakeProcess();
+    // A live pid, so spawn list's own reconciliation keeps the running record.
+    proc.pid = process.pid;
     spawnMock.mockReturnValue(proc as any);
+    const spawnList = (op: 'list' | 'history') =>
+      executeSpawn(op, {} as MessengerActionParams, {} as MessengerState, cwd, sessionId).details
+        .agents as Array<Record<string, unknown>>;
 
     const agent = spawnSubagent(
       cwd,
@@ -96,36 +104,20 @@ describe('cleanupExitedSpawned with event-sourced persistence', () => {
       sessionId
     );
 
-    expect(listSpawned(cwd, sessionId)).toHaveLength(1);
-
-    // The spawn event is published together with its PID
-    const jsonlPath = getAgentEventsJsonlPath(cwd, sessionId);
-    expect(fs.existsSync(jsonlPath)).toBe(true);
-    const events = fs.readFileSync(jsonlPath, 'utf-8').trim().split('\n');
-    expect(events).toHaveLength(1);
-    const spawnEvent = JSON.parse(events[0]!);
-    expect(spawnEvent.type).toBe('spawned');
-    expect(spawnEvent.id).toBe(agent.id);
-    expect(spawnEvent.agent.pid).toBeDefined();
+    expect(spawnList('list')).toMatchObject([
+      { id: agent.id, status: 'running', pid: process.pid },
+    ]);
 
     // Simulate clean exit with code 0
     proc.exitCode = 0;
     proc.emit('close', 0);
 
-    // Agent persisted as completed - use listSpawned with includeAll=true
-    const agents = listSpawned(cwd, sessionId, true);
-    expect(agents).toHaveLength(1);
-    expect(agents[0]?.status).toBe('completed');
-    expect(agents[0]?.endedAt).toBeDefined();
-
-    // By default, listSpawned only returns running agents (should be 0 now)
-    expect(listSpawned(cwd, sessionId)).toHaveLength(0);
-
-    // Check event log now has spawned + completed events
-    const updatedEvents = fs.readFileSync(jsonlPath, 'utf-8').trim().split('\n').filter(Boolean);
-    expect(updatedEvents).toHaveLength(2);
-    const completeEvent = JSON.parse(updatedEvents[1]!);
-    expect(completeEvent.type).toBe('completed');
+    // A fresh reader (no in-memory runtimes) sees only what was persisted.
+    clearSpawnStateForTests();
+    expect(spawnList('list')).toEqual([]);
+    expect(spawnList('history')).toMatchObject([
+      { id: agent.id, status: 'completed', pid: process.pid, endedAt: expect.any(String) },
+    ]);
 
     cleanupTempDir(cwd);
   });
