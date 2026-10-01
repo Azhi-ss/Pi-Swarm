@@ -104,6 +104,10 @@ export function loadSpawnedAgents(cwd: string, sessionId: string): SpawnedAgent[
       // Skip malformed lines
     }
   }
+  // Records written before sandboxRetained existed carry only the error text.
+  for (const agent of agentsById.values())
+    if (agent.sandboxRetained === undefined && agent.error?.startsWith(PRESERVATION_FAILED))
+      agent.sandboxRetained = true;
 
   return Array.from(agentsById.values()).sort(
     (a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt)
@@ -346,26 +350,42 @@ function cleanupTmpDir(tmpDir: string | null) {
 
 export const PRESERVATION_FAILED = 'Candidate preservation failed; Sandbox retained';
 
-function preserveBeforeCleanup(state: SpawnState, sessionId: string): string | undefined {
-  const closing = runtimes.get(state.id);
-  if (closing && activeRunId(state.cwd) === sessionId && !closing.stopping) {
-    try {
-      preserveCandidate(closing.record);
-    } catch (error) {
-      return `${PRESERVATION_FAILED}: ${String(error)}`;
-    }
+/**
+ * Preserve `candidate` (if given), then remove the Sandbox. On failure the
+ * Sandbox stays on disk and the returned error is recorded by the caller.
+ */
+export function reclaimSandbox(
+  cwd: string,
+  id: string,
+  candidate?: SpawnedAgent
+): string | undefined {
+  try {
+    if (candidate) preserveCandidate(candidate);
+    removeWorktree(cwd, id);
+  } catch (error) {
+    return `${PRESERVATION_FAILED}: ${String(error)}`;
   }
-  removeWorktree(state.cwd, state.id);
 }
 
-export function recordSpawnError(cwd: string, sessionId: string, id: string, error: string): void {
+function preserveBeforeCleanup(state: SpawnState, sessionId: string): string | undefined {
+  const closing = runtimes.get(state.id);
+  const preserve = closing && activeRunId(state.cwd) === sessionId && !closing.stopping;
+  return reclaimSandbox(state.cwd, state.id, preserve ? closing.record : undefined);
+}
+
+export function recordRetainedSandbox(
+  cwd: string,
+  sessionId: string,
+  id: string,
+  error: string
+): void {
   const runtime = runtimes.get(id);
-  if (runtime) runtime.record.error = error;
+  if (runtime) Object.assign(runtime.record, { error, sandboxRetained: true });
   appendEvent(cwd, sessionId, {
     id,
     type: 'progress',
     timestamp: new Date().toISOString(),
-    agent: { error },
+    agent: { error, sandboxRetained: true },
   });
 }
 
@@ -425,6 +445,7 @@ function attachHandlers(
       endedAt: new Date().toISOString(),
       exitCode: 1,
       error: [err.message || 'spawn failed', preservationError].filter(Boolean).join('\n'),
+      ...(preservationError && { sandboxRetained: true }),
     };
     runtime.persisted = true;
     appendEvent(state.cwd, sessionId, {
@@ -436,6 +457,7 @@ function attachHandlers(
         endedAt: runtime.record.endedAt,
         exitCode: 1,
         error: runtime.record.error,
+        ...(preservationError && { sandboxRetained: true }),
       },
     });
     generateAgentFile(state.cwd, sessionId, runtime.record);
@@ -481,6 +503,7 @@ function attachHandlers(
         ]
           .filter(Boolean)
           .join('\n') || undefined,
+      ...(preservationError && { sandboxRetained: true }),
     };
 
     runtime.persisted = true;
@@ -493,6 +516,7 @@ function attachHandlers(
         endedAt,
         exitCode: runtime.record.exitCode,
         error: runtime.record.error,
+        ...(preservationError && { sandboxRetained: true }),
       },
     });
 
@@ -612,7 +636,6 @@ export function spawnSubagent(
     env,
     detached: process.platform !== 'win32',
   });
-
   record.pid = proc.pid;
   // Other services treat a running record without a live pid as exited and
   // reclaim its Sandbox, so the record is published only with its pid.
@@ -958,13 +981,8 @@ export function reconcileSpawnedAgents(cwd: string, sessionId: string): number {
     // This covers harness crash-restart: agent process already exited but the
     // close handler never fired because runtimes was lost.
     if (agent.pid && !isProcessAlive(agent.pid)) {
-      let error = 'Process exited (detected by PID liveness check)';
-      try {
-        if (activeRunId(cwd) === sessionId && !agent.stopRequested) preserveCandidate(agent);
-        removeWorktree(cwd, agent.id);
-      } catch (preservation) {
-        error = `${PRESERVATION_FAILED}: ${String(preservation)}`;
-      }
+      const preserve = activeRunId(cwd) === sessionId && !agent.stopRequested;
+      const failure = reclaimSandbox(cwd, agent.id, preserve ? agent : undefined);
       appendEvent(cwd, sessionId, {
         id: agent.id,
         type: 'failed',
@@ -973,7 +991,8 @@ export function reconcileSpawnedAgents(cwd: string, sessionId: string): number {
           status: 'failed',
           endedAt: new Date().toISOString(),
           exitCode: 1,
-          error,
+          error: failure ?? 'Process exited (detected by PID liveness check)',
+          ...(failure && { sandboxRetained: true }),
         },
       });
       reconciled++;

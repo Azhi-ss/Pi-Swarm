@@ -10,14 +10,13 @@ import {
   spawnSubagent,
   reconcileSpawnedAgents,
   stopSpawn,
-  recordSpawnError,
-  PRESERVATION_FAILED,
+  reclaimSandbox,
+  recordRetainedSandbox,
 } from './spawn.js';
 import { replayTasks, appendTaskEvent } from './task-store/events.js';
 import { getAllTasks } from './task-store/queries.js';
 import { writeBlackboard } from './task-store/blackboard.js';
-import { preserveCandidate, listCandidates } from './candidates.js';
-import { removeWorktree } from './worktree/index.js';
+import { listCandidates } from './candidates.js';
 import { isProcessAlive } from '../lib.js';
 import { messengerDirs } from '../project.js';
 import { ensureSessionChannel } from '../channel.js';
@@ -103,16 +102,11 @@ export function recoverRun(cwd: string): void {
   for (const peer of peers) {
     if (live(peer) || peer.stopRequested || !peer.worktreePath || !fs.existsSync(peer.worktreePath))
       continue;
-    try {
-      preserveCandidate(peer);
-    } catch (error) {
-      // The Sandbox is retained and only this peer's task waits for repair.
-      if (peer.taskId) retained.add(peer.taskId);
-      if (!peer.error?.startsWith(PRESERVATION_FAILED))
-        recordSpawnError(cwd, run.id, peer.id, `${PRESERVATION_FAILED}: ${String(error)}`);
-      continue;
-    }
-    removeWorktree(cwd, peer.id);
+    const failure = reclaimSandbox(cwd, peer.id, peer);
+    if (!failure) continue;
+    // The Sandbox is retained and only this peer's task waits for repair.
+    if (peer.taskId) retained.add(peer.taskId);
+    if (!peer.sandboxRetained) recordRetainedSandbox(cwd, run.id, peer.id, failure);
   }
   const tasks = replayTasks(cwd, run.id);
   for (const task of tasks) {

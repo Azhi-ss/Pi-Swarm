@@ -147,6 +147,8 @@ export interface SpawnedAgent {
   worktreePath?: string;
   baseCommit?: string;
   stopRequested?: boolean;
+  /** Candidate preservation failed, so the Sandbox was kept for repair. */
+  sandboxRetained?: boolean;
   port?: number;
   testPort?: number;
 }
