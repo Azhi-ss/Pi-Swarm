@@ -636,6 +636,13 @@ export function spawnSubagent(
     env,
     detached: process.platform !== 'win32',
   });
+  if (!proc.pid) {
+    // The cause (e.g. ENOENT) arrives later as an 'error' event nothing else listens to.
+    proc.once('error', () => {});
+    cleanupTmpDir(promptTmpDir);
+    removeWorktree(cwd, id);
+    throw new Error('Peer process failed to start: pi has no pid');
+  }
   record.pid = proc.pid;
   // Other services treat a running record without a live pid as exited and
   // reclaim its Sandbox, so the record is published only with its pid.
