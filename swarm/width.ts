@@ -5,6 +5,7 @@ import { isProcessAlive } from '../lib.js';
 import { messengerDirs } from '../project.js';
 import { readRun, type SwarmRun } from './run-store.js';
 import { getRunningSpawnCount, listSpawned } from './spawn.js';
+import { finishedAlternativeRoot } from './alternative.js';
 import { getAllTasks, getReadyTasksForTasks } from './task-store/queries.js';
 
 /** A service process's Port Slot pool; beyond it port allocation degrades to random overflow. */
@@ -102,7 +103,7 @@ function registryOwnerLive(cwd: string, name: string): boolean {
 
 /**
  * Why `taskId` cannot be admitted, or null when it is Claimable.
- * Finished Alternative Group membership is not applicable until #22.
+ * A member of a finished Alternative Group is not Claimable.
  */
 export function claimableRejection(
   cwd: string,
@@ -113,6 +114,9 @@ export function claimableRejection(
   const tasks = getAllTasks(cwd, run.id);
   const task = tasks.find((item) => item.id === taskId);
   if (!task) return `Task ${taskId} is not a Claimable Task.`;
+  const finished = finishedAlternativeRoot(task, tasks);
+  if (finished)
+    return `Task ${task.id} is not a Claimable Task (finished Alternative Group ${finished}).`;
   if (run.handoffs[task.id]?.suspended) return `Task ${task.id} is suspended.`;
   const peers = listSpawned(cwd, run.id, true);
   const live = (peer: (typeof peers)[number]) =>

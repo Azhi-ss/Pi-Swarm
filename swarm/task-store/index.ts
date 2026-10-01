@@ -55,6 +55,7 @@ export {
   appendTaskProgress,
   proposeTask,
   challengeTask,
+  supersedeAlternativeLosers,
 } from './commands.js';
 export { cleanupStaleTaskClaims } from './cleanup.js';
 export { generateBlackboard, writeBlackboard } from './blackboard.js';

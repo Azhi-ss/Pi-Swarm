@@ -195,7 +195,7 @@ export const COMMAND_REGISTRY: CommandSpec[] = [
     cmd: 'task create',
     action: 'task.create',
     description: 'Create a new task',
-    flags: ['title', 'content', 'depends-on'],
+    flags: ['title', 'content', 'depends-on', 'alternative-of'],
   },
   {
     cmd: 'task claim',

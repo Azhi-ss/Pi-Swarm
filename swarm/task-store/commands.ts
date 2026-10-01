@@ -12,6 +12,7 @@ import type {
   BlockedPayload,
   ProposedPayload,
   ChallengedPayload,
+  SupersededPayload,
 } from './types.js';
 import { appendTaskEvent, replayAllTasks } from './events.js';
 import { taskSpecPath, writeTaskSpec, deleteTaskSpec } from './persistence.js';
@@ -20,6 +21,13 @@ import { normalizeChannelId } from '../../channel.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { getCircuitBreaker } from '../circuit-breaker/index.js';
+import {
+  alternativeRoot,
+  finishedAlternativeRoot,
+  groupMembers,
+  inAlternativeGroup,
+  isTerminalStatus,
+} from '../alternative.js';
 
 function allocateTaskId(cwd: string, sessionId: string): string {
   const allTasks = getAllTasks(cwd, sessionId);
@@ -56,6 +64,7 @@ export function createTask(
       dependsOn: input.dependsOn,
       createdBy: input.createdBy,
       verifyCommand: input.verifyCommand,
+      alternativeOf: input.alternativeOf,
     } as CreatedPayload,
   });
 
@@ -87,6 +96,7 @@ export function claimTask(
   );
   const unmetDeps = task.depends_on.filter((dep) => !doneIds.has(dep));
   if (unmetDeps.length > 0) return null;
+  if (finishedAlternativeRoot(task, allTasks)) return null;
 
   // If claimed/staked, check if lease is expired for opportunistic preemption
   if (task.status === 'in_progress' || task.status === 'staked') {
@@ -137,6 +147,7 @@ export function stakeTask(
   );
   const unmetDeps = task.depends_on.filter((dep) => !doneIds.has(dep));
   if (unmetDeps.length > 0) return null;
+  if (finishedAlternativeRoot(task, allTasks)) return null;
 
   // If already claimed/staked, check if lease is expired for opportunistic preemption
   if (task.status === 'staked' || task.status === 'in_progress') {
@@ -492,4 +503,53 @@ export function challengeTask(
   });
 
   return getTask(cwd, sessionId, taskId);
+}
+
+/**
+ * After a Direct Verified Merge, mark every other non-terminal member Superseded.
+ * Returns their task ids so the caller can stop peers outside the run lock.
+ * If another member already won, this task is Superseded instead and `won` is false.
+ */
+export function supersedeAlternativeLosers(
+  cwd: string,
+  sessionId: string,
+  winnerId: string
+): { won: boolean; stopTaskIds: string[] } {
+  const tasks = getAllTasks(cwd, sessionId);
+  const winner = tasks.find((task) => task.id === winnerId);
+  if (!winner || !inAlternativeGroup(winner, tasks)) return { won: true, stopTaskIds: [] };
+  const root = alternativeRoot(winner, tasks);
+  const members = groupMembers(tasks, root);
+  const prior = members.find(
+    (member) =>
+      member.id !== winnerId && member.status === 'verified' && member.verification?.exitCode === 0
+  );
+  if (prior) {
+    supersedeMember(cwd, sessionId, winner, prior.id, root);
+    return { won: false, stopTaskIds: [] };
+  }
+  const stopTaskIds: string[] = [];
+  for (const member of members) {
+    if (member.id === winnerId || isTerminalStatus(member.status)) continue;
+    supersedeMember(cwd, sessionId, member, winnerId, root);
+    stopTaskIds.push(member.id);
+  }
+  return { won: true, stopTaskIds };
+}
+
+function supersedeMember(
+  cwd: string,
+  sessionId: string,
+  task: SwarmTask,
+  winnerId: string,
+  rootId: string
+): void {
+  if (isTerminalStatus(task.status)) return;
+  appendTaskEvent(cwd, sessionId, {
+    taskId: task.id,
+    type: 'superseded',
+    timestamp: new Date().toISOString(),
+    agent: task.claimed_by,
+    payload: { rootId, winnerId } as SupersededPayload,
+  });
 }

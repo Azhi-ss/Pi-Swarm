@@ -872,6 +872,7 @@ Environment:
           const title = extractFlag(args, 'title');
           const content = extractFlag(args, 'content');
           const dependsOn = extractFlag(args, 'depends-on');
+          const alternativeOf = extractFlag(args, 'alternative-of');
           if (!title) {
             process.stderr.write('Error: task create requires --title.\n');
             process.exit(1);
@@ -882,6 +883,7 @@ Environment:
               title,
               content: content || undefined,
               dependsOn: dependsOn ? [dependsOn] : undefined,
+              alternativeOf: alternativeOf || undefined,
             })
           );
           break;

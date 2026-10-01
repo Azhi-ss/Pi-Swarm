@@ -4552,3 +4552,469 @@ it('Demand Fill: two services stay within the cap and never double-start a task'
     await closeProvider(provider);
   }
 }, 40_000);
+
+function zoneBody(markdown: string, heading: string) {
+  const start = markdown.indexOf(heading);
+  if (start < 0) return '';
+  const rest = markdown.slice(start);
+  const next = rest.indexOf('\n## ', heading.length);
+  return next < 0 ? rest : rest.slice(0, next);
+}
+
+it('creates an Alternative Group and Supersedes the other peer when one hypothesis is verified', async () => {
+  await command('--start');
+  await command('abort').catch(() => {});
+  setHostWidthCap(4);
+  const release = path.join(root, 'alt-release-winner');
+  const releaseDone = path.join(root, 'alt-release-winner-done');
+  const toolFile = path.join(root, 'alt-loser-tool');
+  const marker = path.join(root, 'alt-loser-orphan');
+  for (const file of [release, releaseDone, toolFile, marker, path.join(project, 'winner.txt')])
+    fs.rmSync(file, { force: true });
+  const second = await secondService();
+  const provider = createHttpServer(async (req, res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    if (raw.includes('Hold the losing hypothesis'))
+      return writeTurn(res, [
+        bash(
+          'lose',
+          `pi-messenger-swarm run join && pi-messenger-swarm task claim task-1 && echo $$ > ${sh(toolFile)} && printf '%s\\n' draft > draft.txt && echo LOSER_READY && while kill -0 "$PI_SWARM_PEER_PID" 2>/dev/null; do sleep 0.05; done; sleep 1; printf '%s\\n' orphan > ${sh(marker)}; sleep 90`,
+          150
+        ),
+      ]);
+    if (raw.includes('Merge the winning hypothesis'))
+      return writeTurn(res, [
+        bash(
+          'win',
+          `pi-messenger-swarm run join && pi-messenger-swarm task claim task-2 && echo WINNER_READY && while [ ! -f ${sh(release)} ]; do sleep 0.05; done && printf '%s\\n' winner > winner.txt && pi-messenger-swarm task done task-2 'B merged' --verify 'node -e "process.exit(0)"' && echo MERGED && while [ ! -f ${sh(releaseDone)} ]; do sleep 0.05; done && kill -KILL "$PI_SWARM_PEER_PID"`,
+          150
+        ),
+      ]);
+    writeTurn(res, [say('READY')]);
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  await second('--start');
+  try {
+    const started = JSON.parse(
+      (
+        await command(
+          'run',
+          'start',
+          '--goal',
+          'Compete hypotheses',
+          '--concurrency',
+          '4',
+          '--max-steps',
+          '80',
+          '--verify',
+          `node -e "if(require('fs').readFileSync('winner.txt','utf8')!=='winner\\n')process.exit(1)"`
+        )
+      ).stdout
+    );
+    await command('run', 'join');
+    await second('run', 'join');
+    await command('task', 'create', '--title', 'Losing hypothesis');
+    await command('task', 'create', '--title', 'Winning hypothesis', '--alternative-of', 'task-1');
+    await command('task', 'create', '--title', 'Joined hypothesis', '--alternative-of', 'task-2');
+    expect((await command('task', 'show', 'task-2')).stdout).toContain('Alternative of: task-1');
+    expect((await command('task', 'show', 'task-3')).stdout).toContain('Alternative of: task-1');
+    expect((await command('task', 'show', 'task-1')).stdout).not.toContain('Alternative of:');
+    const demand = (await runStatus()).width.openDemand;
+    expect(demand).toBe(3);
+    await command('propose', 'task-1', 'Keep the original approach');
+    await command('challenge', 'task-1', 'The original approach may be slower');
+    expect((await runStatus()).width.openDemand).toBe(demand);
+    expect((await command('task', 'list')).stdout).not.toContain('task-4');
+    const backlog = zoneBody(await command('blackboard').then((r) => r.stdout), '## 🎯 Zone 1');
+    expect(backlog.match(/alt of task-1/g)).toHaveLength(3);
+    const head = (await run('git', ['rev-parse', 'HEAD'])).stdout.trim();
+    await second(
+      'spawn',
+      '--task-id',
+      'task-1',
+      '--name',
+      'Loser',
+      '--model',
+      'fixture/fixture',
+      'Hold the losing hypothesis'
+    );
+    await command(
+      'spawn',
+      '--task-id',
+      'task-2',
+      '--name',
+      'Winner',
+      '--model',
+      'fixture/fixture',
+      'Merge the winning hypothesis'
+    );
+    const loserId = spawnedId((await command('spawn', 'list')).stdout, 'Loser');
+    const winnerId = spawnedId((await command('spawn', 'list')).stdout, 'Winner');
+    expect(loserId).toBeTruthy();
+    expect(winnerId).toBeTruthy();
+    const loserPeer = await peerPid(second, loserId!);
+    const winnerPeer = await peerPid(command, winnerId!);
+    recordPid(loserPeer);
+    recordPid(winnerPeer);
+    await vi.waitFor(
+      async () => expect((await second('ps', 'logs', loserId!)).stdout).toContain('LOSER_READY'),
+      { timeout: 20_000 }
+    );
+    await vi.waitFor(
+      async () => expect((await command('ps', 'logs', winnerId!)).stdout).toContain('WINNER_READY'),
+      { timeout: 20_000 }
+    );
+    expect(isAlive(loserPeer)).toBe(true);
+    expect(isAlive(winnerPeer)).toBe(true);
+    const [tool] = await readPidLines(toolFile, 1);
+    expect(tool).not.toBe(loserPeer);
+    expect(isAlive(tool)).toBe(true);
+    await expect(
+      command('spawn', '--task-id', 'task-1', '--model', 'fixture/fixture', 'Second lease')
+    ).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining('claimed by a live owner'),
+    });
+    const consumedBefore = (await runStatus()).consumedSteps;
+    const loserSandbox = path.join(project, '.swarm', 'workspaces', `worker-${loserId}`);
+    expect(fs.existsSync(loserSandbox)).toBe(true);
+    let toolDeadWhileSandboxRemained = false;
+    const watch = (async () => {
+      const deadline = Date.now() + 25_000;
+      while (Date.now() < deadline) {
+        if (!isAlive(tool) && fs.existsSync(loserSandbox)) toolDeadWhileSandboxRemained = true;
+        if (toolDeadWhileSandboxRemained && !fs.existsSync(loserSandbox)) return;
+        await sleep(5);
+      }
+    })();
+    fs.writeFileSync(release, 'go\n');
+    await vi.waitFor(
+      async () => expect((await command('ps', 'logs', winnerId!)).stdout).toContain('MERGED'),
+      { timeout: 25_000 }
+    );
+    await watch;
+    expect(toolDeadWhileSandboxRemained).toBe(true);
+    expect(isAlive(tool), `loser tool ${tool}`).toBe(false);
+    expect(isAlive(loserPeer)).toBe(false);
+    expect(fs.existsSync(loserSandbox)).toBe(false);
+    await command('run', 'join');
+    expect(JSON.parse((await command('candidate', 'list', '--task', 'task-1')).stdout)).toEqual([]);
+    await sleep(1500);
+    expect(fs.existsSync(marker)).toBe(false);
+    const afterStop = JSON.parse((await command('run', 'show', started.id)).stdout);
+    expect(afterStop.handoffs['task-1']?.successor).toBeFalsy();
+    expect(afterStop.handoffs['task-3']?.successor).toBeFalsy();
+    expect(afterStop.maxSteps).toBe(80);
+    expect(afterStop.consumedSteps).toBeGreaterThanOrEqual(consumedBefore);
+    const loser = (await command('task', 'show', 'task-1')).stdout;
+    const joined = (await command('task', 'show', 'task-3')).stdout;
+    const winner = (await command('task', 'show', 'task-2')).stdout;
+    expect(loser).toContain('Status: superseded');
+    expect(loser).toContain('Verification attempts: 0');
+    expect(joined).toContain('Status: superseded');
+    expect(winner).toContain('Status: verified');
+    const taskLog = fs.readFileSync(
+      path.join(project, '.pi', 'messenger', 'tasks', `${started.id}.jsonl`),
+      'utf8'
+    );
+    const superseded = taskLog
+      .split('\n')
+      .filter((line) => line.includes('"type":"superseded"'))
+      .map((line) => JSON.parse(line).taskId as string)
+      .sort();
+    expect(superseded).toEqual(['task-1', 'task-3']);
+    expect(
+      taskLog
+        .split('\n')
+        .some((line) => line.includes('"taskId":"task-1"') && line.includes('dead_end'))
+    ).toBe(false);
+    const agentLog = fs
+      .readFileSync(path.join(project, '.pi', 'messenger', 'agents', `${started.id}.jsonl`), 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    expect(
+      agentLog.some((event) => event.id === loserId && event.agent?.stopRequested === true)
+    ).toBe(true);
+    expect(
+      agentLog.filter((event) => event.type === 'spawned' && event.agent?.taskId === 'task-1')
+    ).toHaveLength(1);
+    const subjects = (await run('git', ['log', '--format=%s', `${head}..HEAD`])).stdout.trim();
+    expect(subjects.split('\n').filter(Boolean)).toEqual([expect.stringContaining('task-2')]);
+    expect(subjects).not.toContain('task-1');
+    expect(fs.readFileSync(path.join(project, 'winner.txt'), 'utf8')).toBe('winner\n');
+    expect(fs.existsSync(path.join(project, 'draft.txt'))).toBe(false);
+    const board = (await command('blackboard')).stdout;
+    const verifiedZone = zoneBody(board, '## 🏆 Zone 3');
+    const supersededLines = verifiedZone.split('\n').filter((line) => line.includes('Superseded:'));
+    expect(supersededLines).toHaveLength(1);
+    expect(supersededLines[0]).toContain('[task-1]');
+    expect(supersededLines[0]).toContain('[task-3]');
+    expect(verifiedZone).toContain('[task-2]');
+    const graveyard = zoneBody(board, '## 🪦 Zone 4');
+    expect(graveyard).not.toContain('task-1');
+    expect(graveyard).not.toContain('Losing hypothesis');
+    expect((await command('feed', '--limit', '40')).stdout).not.toContain('dead_end task-1');
+    await expect(
+      command('spawn', '--task-id', 'task-1', '--model', 'fixture/fixture', 'After the win')
+    ).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining('finished Alternative Group task-1'),
+    });
+    const openAfterWin = (await runStatus()).width.openDemand;
+    await command('task', 'create', '--title', 'Late hypothesis', '--alternative-of', 'task-2');
+    expect((await command('task', 'show', 'task-4')).stdout).toContain('Alternative of: task-1');
+    expect((await runStatus()).width.openDemand).toBe(openAfterWin);
+    await expect(
+      command('spawn', '--task-id', 'task-4', '--model', 'fixture/fixture', 'Late admission')
+    ).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining('finished Alternative Group task-1'),
+    });
+    fs.writeFileSync(releaseDone, 'go\n');
+    await vi.waitFor(() => expect(isAlive(winnerPeer)).toBe(false), { timeout: 10_000 });
+    await vi.waitFor(
+      async () =>
+        expect(JSON.parse((await command('run', 'show', started.id)).stdout).status).toBe(
+          'completed'
+        ),
+      { timeout: 20_000 }
+    );
+    const archived = JSON.parse((await command('run', 'show', started.id)).stdout);
+    expect(archived.acceptance.exitCode).toBe(0);
+    expect(archived.maxSteps).toBe(80);
+    expect(archived.consumedSteps).toBeGreaterThanOrEqual(consumedBefore);
+  } finally {
+    await command('abort').catch(() => {});
+    await second('--stop').catch(() => {});
+    fs.rmSync(hostConfig(), { force: true });
+    provider.closeAllConnections();
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
+  }
+}, 90_000);
+
+it('does not Supersede an Alternative Group when verification passes but the merge conflicts', async () => {
+  await command('--start');
+  await command('abort').catch(() => {});
+  setHostWidthCap(4);
+  const release = path.join(root, 'alt-release-conflict');
+  fs.rmSync(release, { force: true });
+  fs.writeFileSync(path.join(project, 'conflict.txt'), 'base\n');
+  await run('git', ['add', 'conflict.txt']);
+  await run('git', ['commit', '-m', 'conflict baseline']);
+  const provider = createHttpServer(async (req, res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    if (raw.includes('Hold the untouched hypothesis'))
+      return writeTurn(res, [
+        bash(
+          'hold',
+          'pi-messenger-swarm run join && pi-messenger-swarm task claim task-1 && echo HOLDER_READY && sleep 90',
+          120
+        ),
+      ]);
+    if (raw.includes('Try the conflicting hypothesis'))
+      return writeTurn(res, [
+        bash(
+          'conflict',
+          `pi-messenger-swarm run join && pi-messenger-swarm task claim task-2 && printf '%s\\n' peer > conflict.txt && echo CONFLICT_READY && while [ ! -f ${sh(release)} ]; do sleep 0.05; done && pi-messenger-swarm task done task-2 'try merge' --verify 'node -e "process.exit(0)"'; echo DONE_EXIT:$?`,
+          120
+        ),
+      ]);
+    writeTurn(res, [say('READY')]);
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  try {
+    await command(
+      'run',
+      'start',
+      '--goal',
+      'Conflict does not win',
+      '--concurrency',
+      '4',
+      '--max-steps',
+      '40'
+    );
+    await command('run', 'join');
+    await command('task', 'create', '--title', 'Untouched hypothesis');
+    await command(
+      'task',
+      'create',
+      '--title',
+      'Conflicting hypothesis',
+      '--alternative-of',
+      'task-1'
+    );
+    const head = (await run('git', ['rev-parse', 'HEAD'])).stdout.trim();
+    await command(
+      'spawn',
+      '--task-id',
+      'task-1',
+      '--name',
+      'Holder',
+      '--model',
+      'fixture/fixture',
+      'Hold the untouched hypothesis'
+    );
+    await command(
+      'spawn',
+      '--task-id',
+      'task-2',
+      '--name',
+      'Rival',
+      '--model',
+      'fixture/fixture',
+      'Try the conflicting hypothesis'
+    );
+    const holderId = spawnedId((await command('spawn', 'list')).stdout, 'Holder');
+    const rivalId = spawnedId((await command('spawn', 'list')).stdout, 'Rival');
+    expect(holderId).toBeTruthy();
+    expect(rivalId).toBeTruthy();
+    const holderPeer = await peerPid(command, holderId!);
+    recordPid(holderPeer);
+    await vi.waitFor(
+      async () => expect((await command('ps', 'logs', holderId!)).stdout).toContain('HOLDER_READY'),
+      { timeout: 20_000 }
+    );
+    await vi.waitFor(
+      async () =>
+        expect((await command('ps', 'logs', rivalId!)).stdout).toContain('CONFLICT_READY'),
+      { timeout: 20_000 }
+    );
+    fs.writeFileSync(path.join(project, 'conflict.txt'), 'host\n');
+    await run('git', ['add', 'conflict.txt']);
+    await run('git', ['commit', '-m', 'host moved']);
+    fs.writeFileSync(release, 'go\n');
+    await vi.waitFor(
+      async () => expect((await command('ps', 'logs', rivalId!)).stdout).toContain('DONE_EXIT:1'),
+      { timeout: 20_000 }
+    );
+    expect(isAlive(holderPeer)).toBe(true);
+    expect((await command('task', 'show', 'task-1')).stdout).toContain('Status: in_progress');
+    expect((await command('task', 'show', 'task-1')).stdout).not.toContain('superseded');
+    const rival = (await command('task', 'show', 'task-2')).stdout;
+    expect(rival).toContain('Status: in_progress');
+    expect(rival).toContain('Verification attempts: 1');
+    expect((await command('ps', 'logs', rivalId!)).stdout).toContain('Merge collision');
+    const subjects = (await run('git', ['log', '--format=%s', `${head}..HEAD`])).stdout;
+    expect(subjects).toContain('host moved');
+    expect(subjects).not.toContain('verify & merge');
+    expect(zoneBody((await command('blackboard')).stdout, '## 🪦 Zone 4')).not.toContain('task-2');
+  } finally {
+    await command('abort').catch(() => {});
+    fs.rmSync(hostConfig(), { force: true });
+    provider.closeAllConnections();
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
+  }
+}, 60_000);
+
+it('prunes one Alternative Group hypothesis while the other keeps running, then delivers All-Dead', async () => {
+  await command('--start');
+  await command('abort').catch(() => {});
+  const release = path.join(root, 'alt-release-prune');
+  fs.rmSync(release, { force: true });
+  const provider = createHttpServer(async (req, res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    let messages: Message[] = [];
+    try {
+      messages = JSON.parse(raw).messages;
+    } catch {
+      messages = [];
+    }
+    if (unanswered(messages, 'All-Dead Attribution Brief', 'HANDLED_ALL_DEAD'))
+      return writeTurn(res, [say('HANDLED_ALL_DEAD')]);
+    if (raw.includes('Keep the sibling hypothesis running'))
+      return writeTurn(res, [
+        bash(
+          'sibling',
+          `pi-messenger-swarm run join && pi-messenger-swarm task claim task-2 && echo SIBLING_READY && while [ ! -f ${sh(release)} ]; do sleep 0.05; done && for i in 1 2 3; do pi-messenger-swarm task done task-2 fails --verify 'node -e "process.exit(4)"' || true; done && echo SIBLING_PRUNED && sleep 0.3 && kill -KILL "$PI_SWARM_PEER_PID"`,
+          150
+        ),
+      ]);
+    writeTurn(res, [say('READY')]);
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  const delegator = startPi(project, env);
+  try {
+    delegator.prompt('ready');
+    await vi.waitFor(
+      () => expect(delegator.output.includes('READY'), delegator.output.slice(-1500)).toBe(true),
+      { timeout: 15_000 }
+    );
+    await command(
+      'run',
+      'start',
+      '--goal',
+      'Prune one hypothesis',
+      '--concurrency',
+      '4',
+      '--max-steps',
+      '40'
+    );
+    await command('run', 'join');
+    await command('task', 'create', '--title', 'Refuted hypothesis');
+    await command('task', 'create', '--title', 'Sibling hypothesis', '--alternative-of', 'task-1');
+    await command(
+      'spawn',
+      '--task-id',
+      'task-2',
+      '--name',
+      'Sibling',
+      '--model',
+      'fixture/fixture',
+      'Keep the sibling hypothesis running'
+    );
+    const siblingId = spawnedId((await command('spawn', 'list')).stdout, 'Sibling');
+    expect(siblingId).toBeTruthy();
+    const siblingPeer = await peerPid(command, siblingId!);
+    recordPid(siblingPeer);
+    await vi.waitFor(
+      async () =>
+        expect((await command('ps', 'logs', siblingId!)).stdout).toContain('SIBLING_READY'),
+      { timeout: 20_000 }
+    );
+    await command('task', 'claim', 'task-1');
+    for (let attempt = 0; attempt < 3; attempt++)
+      await expect(
+        command('task', 'done', 'task-1', 'fails', '--verify', 'node -e "process.exit(7)"')
+      ).rejects.toMatchObject({ code: 1 });
+    expect(isAlive(siblingPeer)).toBe(true);
+    expect((await command('task', 'show', 'task-1')).stdout).toContain('Status: dead_end');
+    expect((await command('task', 'show', 'task-1')).stdout).toContain('Verification attempts: 3');
+    expect((await command('task', 'show', 'task-2')).stdout).toContain('Status: in_progress');
+    expect((await command('feed', '--limit', '40')).stdout).toContain('dead_end task-1');
+    expect((await command('feed', '--limit', '40')).stdout).not.toContain('dead_end task-2');
+    expect(zoneBody((await command('blackboard')).stdout, '## 🪦 Zone 4')).toContain('task-1');
+    expect(zoneBody((await command('blackboard')).stdout, '## 🪦 Zone 4')).not.toContain('task-2');
+    expect(replies(delegator.output, 'HANDLED_ALL_DEAD')).toBe(0);
+    fs.writeFileSync(release, 'go\n');
+    await vi.waitFor(
+      async () =>
+        expect((await command('ps', 'logs', siblingId!)).stdout).toContain('SIBLING_PRUNED'),
+      { timeout: 20_000 }
+    );
+    await vi.waitFor(() => expect(isAlive(siblingPeer)).toBe(false), { timeout: 10_000 });
+    expect((await command('task', 'show', 'task-2')).stdout).toContain('Status: dead_end');
+    expect((await command('feed', '--limit', '40')).stdout).toContain('dead_end task-2');
+    await vi.waitFor(
+      () =>
+        expect(replies(delegator.output, 'HANDLED_ALL_DEAD'), delegator.output.slice(-2000)).toBe(
+          1
+        ),
+      { timeout: 20_000 }
+    );
+  } finally {
+    await delegator.stop();
+    await command('abort').catch(() => {});
+    provider.closeAllConnections();
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
+  }
+}, 90_000);

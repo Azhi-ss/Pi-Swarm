@@ -152,18 +152,14 @@ export function acceptanceEvidence(cwd: string, runId: string, head: string): st
   return createHash('sha256').update(`${head}\0${body}`).digest('hex');
 }
 
-/** Pruned alternatives are terminal, not failed prerequisites for another solution. */
+/** Pruned and Superseded hypotheses are terminal, and neither is a verified success. */
 export function readyForAcceptance(tasks: SwarmTask[]): boolean {
+  const succeeded = (task: SwarmTask) =>
+    ['done', 'verified', 'archived'].includes(task.status) && task.verification?.exitCode === 0;
   return (
-    tasks.some(
-      (task) =>
-        ['done', 'verified', 'archived'].includes(task.status) && task.verification?.exitCode === 0
-    ) &&
+    tasks.some(succeeded) &&
     tasks.every(
-      (task) =>
-        task.status === 'dead_end' ||
-        (['done', 'verified', 'archived'].includes(task.status) &&
-          task.verification?.exitCode === 0)
+      (task) => task.status === 'dead_end' || task.status === 'superseded' || succeeded(task)
     )
   );
 }

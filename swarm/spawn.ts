@@ -375,7 +375,15 @@ export function reclaimSandbox(
 function preserveBeforeCleanup(state: SpawnState, sessionId: string): string | undefined {
   const closing = runtimes.get(state.id);
   reapOwnedToolProcesses(closing?.record.pid);
-  const preserve = closing && activeRunId(state.cwd) === sessionId && !closing.stopping;
+  const persistedStop = loadSpawnedAgents(state.cwd, sessionId).some(
+    (agent) => agent.id === state.id && agent.stopRequested
+  );
+  const preserve =
+    closing &&
+    activeRunId(state.cwd) === sessionId &&
+    !closing.stopping &&
+    !closing.record.stopRequested &&
+    !persistedStop;
   return reclaimSandbox(state.cwd, state.id, preserve ? closing.record : undefined);
 }
 
@@ -731,7 +739,13 @@ export function listSpawned(
   for (const [id, runtime] of runtimes.entries()) {
     if (runtime.record.cwd !== cwd) continue;
     if (runtime.record.sessionId !== sessionId) continue;
-    persistedById.set(id, runtime.record);
+    const disk = persistedById.get(id);
+    persistedById.set(id, {
+      ...disk,
+      ...runtime.record,
+      id,
+      stopRequested: runtime.record.stopRequested || disk?.stopRequested,
+    });
   }
 
   let agents = Array.from(persistedById.values());
@@ -830,6 +844,36 @@ export function stopSpawn(cwd: string, id: string, recoverable = false): boolean
   }, 4000).unref();
 
   return true;
+}
+
+/**
+ * Non-recoverable stop for a Superseded peer. Uses the in-process stop path when
+ * this service owns the runtime; otherwise persists the stop and reaps the
+ * recorded PID's tool processes before signalling that process group.
+ * Callers must not hold the project run lock: reap waits for tool exit.
+ */
+export function stopSupersededPeer(cwd: string, sessionId: string, id: string): void {
+  const recorded = loadSpawnedAgents(cwd, sessionId).find((agent) => agent.id === id);
+  const owned = stopSpawn(cwd, id, false);
+  if (!owned && recorded) {
+    if (!recorded.stopRequested) {
+      appendEvent(cwd, sessionId, {
+        id,
+        type: 'progress',
+        timestamp: new Date().toISOString(),
+        agent: { stopRequested: true },
+      });
+    }
+    // Same order as stopSpawn: reap tool groups before the peer is killed.
+    reapOwnedToolProcesses(recorded.pid);
+  }
+  const pid = runtimes.get(id)?.record.pid ?? recorded?.pid;
+  if (!pid || pid <= 1) return;
+  const deadline = Date.now() + 5_000;
+  while (isProcessAlive(pid) && Date.now() < deadline) {
+    killPidGroup(pid, 'SIGKILL');
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  }
 }
 
 /** Kill and reclaim only this run's peer process groups and Sandboxes. */

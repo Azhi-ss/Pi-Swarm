@@ -17,6 +17,7 @@ export type TaskEventType =
   | 'archived'
   | 'proposed'
   | 'challenged'
+  | 'superseded'
   | 'swarm.abort';
 
 export interface SwarmAbortPayload {
@@ -41,6 +42,12 @@ export interface CreatedPayload {
   dependsOn?: string[];
   createdBy?: string;
   verifyCommand?: string;
+  alternativeOf?: string;
+}
+
+export interface SupersededPayload {
+  rootId: string;
+  winnerId: string;
 }
 
 export interface StakedPayload {

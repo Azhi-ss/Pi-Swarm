@@ -21,6 +21,7 @@ export interface MessengerActionParams {
   title?: string;
   content?: string;
   dependsOn?: string[];
+  alternativeOf?: string;
   summary?: string;
   evidence?: TaskEvidence;
   cascade?: boolean;

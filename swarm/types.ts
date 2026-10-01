@@ -6,7 +6,8 @@ export type SwarmTaskStatus =
   | 'done'
   | 'dead_end'
   | 'blocked'
-  | 'archived';
+  | 'archived'
+  | 'superseded';
 
 export interface SwarmTaskEvidence {
   commits?: string[];
@@ -83,6 +84,8 @@ export interface SwarmTask {
   dead_ends?: SwarmTaskDeadEndRecord[];
   dead_end_reason?: string;
   dead_end_at?: string;
+  /** Root task id of this hypothesis's Alternative Group. Absent on the root itself. */
+  alternative_of?: string;
   verification_attempts?: number;
   last_verification_failure?: {
     timestamp: string;
@@ -101,6 +104,8 @@ export interface SwarmTaskCreateInput {
   channel?: string;
   verifyCommand?: string;
   leaseTtl?: number;
+  /** Join this task's Alternative Group. A member pointer is stored as the group root. */
+  alternativeOf?: string;
 }
 
 export interface SwarmSummary {

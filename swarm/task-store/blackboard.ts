@@ -5,6 +5,7 @@ import type { SwarmTask } from '../types.js';
 import { getAllTasks, getSummaryForTasks } from './queries.js';
 import { isProcessAlive } from '../../lib.js';
 import { getCircuitBreaker } from '../circuit-breaker/index.js';
+import { alternativeRoot, groupMembers, inAlternativeGroup } from '../alternative.js';
 import { computeWidth, formatWidth } from '../width.js';
 
 interface ActivePeerInfo {
@@ -134,13 +135,14 @@ export function generateBlackboard(cwd: string, sessionId: string): string {
   } else {
     for (const t of goalTasks) {
       const isReady = t.status === 'todo' && t.depends_on.every((d) => doneIds.has(d));
+      const alt = inAlternativeGroup(t, allTasks) ? `, alt of ${alternativeRoot(t, allTasks)}` : '';
       const statusLabel =
         t.status === 'blocked'
           ? `Blocked (${t.blocked_reason ?? 'unknown'})`
           : isReady
             ? 'Ready'
             : 'Pending Dependencies';
-      lines.push(`- **[${t.id}]** \`${t.title}\` (${statusLabel})`);
+      lines.push(`- **[${t.id}]** \`${t.title}\` (${statusLabel}${alt})`);
       if (t.verify_command) {
         lines.push(`  - Verify: \`${t.verify_command}\``);
       }
@@ -207,6 +209,14 @@ export function generateBlackboard(cwd: string, sessionId: string): string {
       );
       if (t.summary) {
         lines.push(`  - Summary: "${t.summary}"`);
+      }
+      const superseded = groupMembers(allTasks, alternativeRoot(t, allTasks)).filter(
+        (member) => member.status === 'superseded'
+      );
+      if (superseded.length) {
+        lines.push(
+          `  - Superseded: ${superseded.map((member) => `[${member.id}] ${member.title}`).join(', ')}`
+        );
       }
     }
   }

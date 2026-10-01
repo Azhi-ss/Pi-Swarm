@@ -6,6 +6,7 @@ import { logFeedEvent } from '../../feed/index.js';
 import * as taskStore from '../task-store.js';
 import { summaryLine } from './_utils.js';
 import { getCircuitBreaker } from '../circuit-breaker/index.js';
+import { finishedAlternativeRoot } from '../alternative.js';
 
 export function taskCreate(
   params: MessengerActionParams,
@@ -39,7 +40,22 @@ export function taskCreate(
     }
   }
 
-  const task = taskStore.createTask(
+  let alternativeOf: string | undefined;
+  if (params.alternativeOf) {
+    const target = taskStore
+      .getAllTasks(cwd, sessionId)
+      .find((task) => task.id === params.alternativeOf);
+    if (!target) {
+      return result(`Error: alternative ${params.alternativeOf} not found`, {
+        mode: 'task.create',
+        error: 'alternative_not_found',
+        alternativeOf: params.alternativeOf,
+      });
+    }
+    alternativeOf = target.alternative_of ?? target.id;
+  }
+
+  const created = taskStore.createTask(
     cwd,
     sessionId,
     {
@@ -48,9 +64,16 @@ export function taskCreate(
       dependsOn,
       createdBy: state.agentName,
       channel: channelId,
+      alternativeOf,
     },
     channelId
   );
+  const tasks = taskStore.getAllTasks(cwd, sessionId);
+  const fresh = tasks.find((task) => task.id === created.id) ?? created;
+  // Joining a group that already has a Direct Verified Merge is terminal.
+  if (finishedAlternativeRoot(fresh, tasks))
+    taskStore.supersedeAlternativeLosers(cwd, sessionId, fresh.id);
+  const task = taskStore.getTask(cwd, sessionId, fresh.id) ?? fresh;
 
   logFeedEvent(cwd, state.agentName, 'task.start', task.id, `created ${task.title}`, channelId);
 

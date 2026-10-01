@@ -75,6 +75,7 @@ export function taskShow(
     '',
     `Channel: ${displayChannelLabel(channelId)}`,
     `Status: ${task.status}`,
+    ...(task.alternative_of ? [`Alternative of: ${task.alternative_of}`] : []),
     `Verification attempts: ${task.verification_attempts ?? 0}`,
     task.claimed_by ? `Claimed by: ${task.claimed_by}` : 'Claimed by: (none)',
     task.depends_on.length > 0 ? `Depends on: ${task.depends_on.join(', ')}` : 'Depends on: (none)',

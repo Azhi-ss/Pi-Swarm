@@ -6,6 +6,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { isProcessAlive } from '../../lib.js';
 import { logFeedEvent } from '../../feed/index.js';
+import { finishedAlternativeRoot } from '../alternative.js';
 import { writeBlackboard } from './blackboard.js';
 
 // Throttled cleanup tracking per cwd+sessionId
@@ -199,7 +200,12 @@ export function getReadyTasksForTasks(tasks: SwarmTask[]): SwarmTask[] {
   const doneIds = new Set(
     tasks.filter((t) => t.status === 'done' || t.status === 'verified').map((t) => t.id)
   );
-  return tasks.filter((t) => t.status === 'todo' && t.depends_on.every((dep) => doneIds.has(dep)));
+  return tasks.filter(
+    (t) =>
+      t.status === 'todo' &&
+      t.depends_on.every((dep) => doneIds.has(dep)) &&
+      !finishedAlternativeRoot(t, tasks)
+  );
 }
 
 export function getGoalTasks(cwd: string, sessionId: string): SwarmTask[] {

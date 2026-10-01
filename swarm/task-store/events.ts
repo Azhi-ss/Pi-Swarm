@@ -58,6 +58,7 @@ export function replayEventsToMap(cwd: string, sessionId: string): Map<string, S
             channel: event.channel,
             attempt_count: 0,
             verify_command: payload.verifyCommand,
+            alternative_of: payload.alternativeOf,
           };
           tasksById.set(event.taskId, task);
           break;
@@ -295,6 +296,18 @@ export function replayEventsToMap(cwd: string, sessionId: string): Map<string, S
             targetClaimant: payload.targetClaimant ?? existing.claimed_by,
             timestamp: event.timestamp,
           });
+          existing.updated_at = event.timestamp;
+          break;
+        }
+
+        case 'superseded': {
+          if (!existing) continue;
+          existing.status = 'superseded';
+          delete existing.claimed_by;
+          delete existing.claimed_at;
+          delete existing.claim_reason;
+          delete existing.lease_ttl;
+          delete existing.lease_expires_at;
           existing.updated_at = event.timestamp;
           break;
         }

@@ -9,7 +9,8 @@ import { summaryLine } from './_utils.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { ensureGitExclude } from '../../project.js';
-import { listSpawned } from '../spawn.js';
+import { listSpawned, stopSupersededPeer } from '../spawn.js';
+import { withRunLock } from '../run-store.js';
 import { criticalHeader } from '../notifications.js';
 import {
   runVerification,
@@ -514,17 +515,40 @@ export function taskDone(
 
     const commitSha = mergeRes.commitSha;
 
-    const verified = taskStore.verifyTask(cwd, sessionId, existing.id, state.agentName, {
-      summary,
-      command: verifyCommand,
-      exitCode: 0,
-      patch: patchPath ?? undefined,
-      evidence,
-      outputSnippet: verifRes.stdout.slice(0, 300),
-      commitSha,
-      commit: commitSha,
-      passed: true,
-    } as any);
+    // Decide the winner under the run lock, then stop peers outside it.
+    // withRunLock is not reentrant and reapOwnedToolProcesses waits.
+    const outcome = withRunLock(cwd, () => {
+      const decision = taskStore.supersedeAlternativeLosers(cwd, sessionId, existing.id);
+      if (!decision.won) return { ...decision, verified: null };
+      const verified = taskStore.verifyTask(cwd, sessionId, existing.id, state.agentName, {
+        summary,
+        command: verifyCommand,
+        exitCode: 0,
+        patch: patchPath ?? undefined,
+        evidence,
+        outputSnippet: verifRes.stdout.slice(0, 300),
+        commitSha,
+        commit: commitSha,
+        passed: true,
+      } as any);
+      return { ...decision, verified };
+    });
+    if (!outcome.won || !outcome.verified) {
+      ensureGitExclude(cwd);
+      taskStore.writeBlackboard(cwd, sessionId);
+      return result(`Error: ${existing.id} is not the winner of its Alternative Group.`, {
+        mode: 'task.done',
+        error: 'superseded',
+        id: existing.id,
+      });
+    }
+    const verified = outcome.verified;
+    for (const peer of listSpawned(cwd, sessionId, true)) {
+      if (!peer.taskId || !outcome.stopTaskIds.includes(peer.taskId) || peer.stopRequested)
+        continue;
+      if (peer.status !== 'running' || !peer.pid) continue;
+      stopSupersededPeer(cwd, sessionId, peer.id);
+    }
 
     ensureGitExclude(cwd);
     taskStore.writeBlackboard(cwd, sessionId);

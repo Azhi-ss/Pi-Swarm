@@ -314,7 +314,9 @@ export function recoverRun(cwd: string): void {
   if (
     !remaining.length &&
     tasks.length &&
-    tasks.every((t) => ['dead_end', 'done', 'verified', 'archived'].includes(t.status)) &&
+    tasks.every((t) =>
+      ['dead_end', 'done', 'verified', 'archived', 'superseded'].includes(t.status)
+    ) &&
     tasks.some((t) => t.status === 'dead_end')
   ) {
     notify(
