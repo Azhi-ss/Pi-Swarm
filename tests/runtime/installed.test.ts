@@ -1486,6 +1486,61 @@ it('keeps the sandbox when preservation fails, still hands off another task, and
   }
 }, 45_000);
 
+it('keeps the sandbox of a peer adopted across a restart when its candidate cannot be saved', async () => {
+  await command('abort').catch(() => {});
+  const provider = createHttpServer(async (req, res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    writeToolTurn(res, `adopted_${raw.length}`, 'echo READY && sleep 30');
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  try {
+    await command('run', 'start', '--goal', 'Reconcile an adopted peer', '--max-steps', '20');
+    await command('run', 'join');
+    await command('task', 'create', '--title', 'Adopted work');
+    await command('task', 'claim', 'task-1');
+    await command(
+      'spawn',
+      '--task-id',
+      'task-1',
+      '--name',
+      'Adopted',
+      '--model',
+      'fixture/fixture',
+      'wait across a restart'
+    );
+    const adoptedId = spawnedId((await command('spawn', 'list')).stdout, 'Adopted');
+    expect(adoptedId).toBeTruthy();
+    const sandbox = path.join(project, '.swarm', 'workspaces', `worker-${adoptedId}`);
+    await vi.waitFor(
+      async () => expect((await command('ps', 'logs', adoptedId!)).stdout).toContain('READY'),
+      { timeout: 15_000 }
+    );
+    const adoptedPid = await peerPid(command, adoptedId!);
+    await coldRestart();
+    expect(spawnedId((await command('spawn', 'list')).stdout, 'Adopted')).toBe(adoptedId);
+    // A dangling gitdir stops git from falling back to the enclosing host repository.
+    fs.writeFileSync(path.join(sandbox, '.git'), 'gitdir: /nonexistent\n');
+    process.kill(-adoptedPid, 'SIGKILL');
+    await vi.waitFor(() => expect(() => process.kill(adoptedPid, 0)).toThrow(), {
+      timeout: 5000,
+      interval: 10,
+    });
+    // spawn list reconciles the dead adopted peer itself, before any 5s liveness poll.
+    expect((await command('spawn', 'list')).stdout).toContain('No spawned agents');
+    expect((await command('spawn', 'history')).stdout).toMatch(
+      new RegExp(`${adoptedId}: Adopted .*Candidate preservation failed; Sandbox retained`)
+    );
+    expect(fs.existsSync(sandbox)).toBe(true);
+  } finally {
+    await command('abort').catch(() => {});
+    provider.closeAllConnections();
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
+  }
+}, 45_000);
+
 it('does not let a saved candidate revive pruned work or reset its verification attempts', async () => {
   await command('abort').catch(() => {});
   const provider = createHttpServer(async (req, res) => {

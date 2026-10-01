@@ -983,18 +983,25 @@ export function reconcileSpawnedAgents(cwd: string, sessionId: string): number {
     if (agent.pid && !isProcessAlive(agent.pid)) {
       const preserve = activeRunId(cwd) === sessionId && !agent.stopRequested;
       const failure = reclaimSandbox(cwd, agent.id, preserve ? agent : undefined);
+      const ended: Partial<SpawnedAgent> = {
+        status: 'failed',
+        endedAt: new Date().toISOString(),
+        exitCode: 1,
+        error: failure ?? 'Process exited (detected by PID liveness check)',
+        ...(failure && { sandboxRetained: true }),
+      };
       appendEvent(cwd, sessionId, {
         id: agent.id,
         type: 'failed',
-        timestamp: new Date().toISOString(),
-        agent: {
-          status: 'failed',
-          endedAt: new Date().toISOString(),
-          exitCode: 1,
-          error: failure ?? 'Process exited (detected by PID liveness check)',
-          ...(failure && { sandboxRetained: true }),
-        },
+        timestamp: ended.endedAt!,
+        agent: ended,
       });
+      // A runtime adopted after a restart would otherwise still list the peer as running.
+      const adopted = runtimes.get(agent.id);
+      if (adopted) {
+        Object.assign(adopted.record, ended);
+        removeLiveWorker(cwd, agent.taskId || spawnLiveKey(agent.id));
+      }
       reconciled++;
     }
   }
