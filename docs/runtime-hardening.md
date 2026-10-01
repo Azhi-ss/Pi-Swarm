@@ -107,6 +107,16 @@ This record covered only the installed suite, not a full test run. The 2026-10-0
 - Automatic handoff: one successor recovered a preserved candidate, failed reverification left the host unchanged, and successful reverification plus overall acceptance archived the run before another run could start. Three missing-provider startup failures, before any tool ran, suspended only that task (`failures: 3`, `takenOver` not true, verification attempts 0, not `dead_end`). A live Delegator handled `HANDLED_SUSPENSION`. History did not gain a fourth attempt until `handoff resume`. Another task in the same run and a task in another Project continued. Abort marked the run `aborted` and did not spawn another successor. A live lease was not stolen. Exhausted budget and a second service still did not create overlapping replacements.
 - Isolation: missing Project Context failed closed. Concurrent starts admitted one run. Shared storage kept same-named peers apart. Host dependencies survived cleanup.
 
+### Verification record — 2026-10-01 (final, b2084b8)
+
+This record supersedes the one below. At `b2084b8`, `npx tsc --noEmit` and `pnpm run build` both exited 0. Two consecutive full runs of `npx vitest run` each passed 74 files and 575 tests, exit 0 (242.59s and 234.13s). Node `24.13.0`, npm `11.6.2`, package `pi-messenger-swarm@0.26.3`, Host/TUI `@earendil-works/pi-coding-agent@0.87.0` and `@earendil-works/pi-tui@0.87.0`. After each run there were no `while(true)` processes. Three `sleep` commands from installed-scenario Pi bash tools (60s, 90s, 120s) briefly outlived their stopped peers with deleted Sandbox directories as cwd, and exited on their own; that is a known open issue, not covered here.
+
+- Overlapping successors: the two-service scenario holds the real `run.lock` across the Original's exit, so both services queue their admission with a snapshot taken before either spawned. Removing the two post-lock rechecks in `swarm/recovery.ts` failed it 3 of 3 times; restored, it passed 3 of 3.
+- Restart reconciliation: a real Pi peer adopted across a service restart dies with a broken Sandbox gitdir. `spawn list` immediately stops listing it, `spawn history` shows `Candidate preservation failed; Sandbox retained`, and the Sandbox stays on disk. Previously the adopted runtime kept listing the dead peer as running for up to 5s.
+- A spawn whose `pi` binary cannot start (no pid) publishes no peer record and counts as one takeover failure.
+- Candidate preservation and Sandbox removal share one function; retention is a structured `sandboxRetained` field, and older records are still recognized by their error text.
+- Test service ports use per-pid lock files, so a stale lock cannot be removed from under a new owner, and lock contents are never read.
+
 ### Verification record — 2026-10-01
 
 Two consecutive full runs of `npx vitest run` each passed 71 files and 568 tests, exit 0 (455.47s and 446.98s). `npx vitest run tests/runtime/installed.test.ts --maxWorkers 1` passed 25 scenarios, exit 0, in 538.36s. `npx tsc --noEmit` and `pnpm run build` both exited 0. Node `24.13.0`, npm `11.6.2`, package `pi-messenger-swarm@0.26.3`, Host/TUI `0.87.0`. Each new or changed installed scenario failed when its guard was broken locally, and passed when the guard was restored.
