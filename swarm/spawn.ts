@@ -21,7 +21,11 @@ import {
   pruneWorktrees,
   getWorktreeInfo,
 } from './worktree/index.js';
-import { processManager, forceKillProcessGroup } from './process-manager.js';
+import {
+  processManager,
+  forceKillProcessGroup,
+  reapOwnedToolProcesses,
+} from './process-manager.js';
 import { getCircuitBreaker } from './circuit-breaker/index.js';
 
 interface SpawnRuntime {
@@ -359,6 +363,7 @@ export function reclaimSandbox(
   id: string,
   candidate?: SpawnedAgent
 ): string | undefined {
+  reapOwnedToolProcesses(candidate?.pid ?? runtimes.get(id)?.record.pid);
   try {
     if (candidate) preserveCandidate(candidate);
     removeWorktree(cwd, id);
@@ -369,6 +374,7 @@ export function reclaimSandbox(
 
 function preserveBeforeCleanup(state: SpawnState, sessionId: string): string | undefined {
   const closing = runtimes.get(state.id);
+  reapOwnedToolProcesses(closing?.record.pid);
   const preserve = closing && activeRunId(state.cwd) === sessionId && !closing.stopping;
   return reclaimSandbox(state.cwd, state.id, preserve ? closing.record : undefined);
 }
@@ -785,6 +791,7 @@ export function stopSpawn(cwd: string, id: string, recoverable = false): boolean
     timestamp: new Date().toISOString(),
     agent: { stopRequested: !recoverable },
   });
+  reapOwnedToolProcesses(runtime.record.pid);
   if (recoverable) preserveCandidate(runtime.record);
   processManager.kill(id, 'SIGTERM');
   // Detached runtimes use PID liveness checks
@@ -821,6 +828,16 @@ export function stopSpawn(cwd: string, id: string, recoverable = false): boolean
 export function stopOwnedRun(cwd: string, runId: string): void {
   const peers = listSpawned(cwd, runId, true);
   const ids = new Set(peers.map((peer) => peer.id));
+  const reap = (pid?: number) => {
+    if (!pid || pid <= 0 || pid === process.pid) return;
+    reapOwnedToolProcesses(pid);
+  };
+  for (const peer of peers) reap(peer.pid);
+  for (const runtime of runtimes.values()) {
+    if (runtime.record.sessionId !== runId || !peerBelongsToProject(cwd, runtime.record.cwd))
+      continue;
+    reap(runtime.record.pid);
+  }
   const kill = (pid?: number) => {
     if (!pid || pid <= 0 || pid === process.pid) return;
     forceKillProcessGroup(pid);
@@ -871,6 +888,7 @@ export function stopAllSpawned(cwd?: string): void {
   for (const [id, runtime] of runtimes.entries()) {
     if (cwd && runtime.record.cwd !== cwd) continue;
     if (runtime.detached) {
+      reapOwnedToolProcesses(runtime.record.pid);
       if (runtime.record.pid && isProcessAlive(runtime.record.pid)) {
         runtime.stopping = true;
         killPidGroup(runtime.record.pid, 'SIGTERM');
@@ -887,6 +905,7 @@ export function stopAllSpawned(cwd?: string): void {
     }
     if (runtime.process.exitCode !== null) continue;
     runtime.stopping = true;
+    reapOwnedToolProcesses(runtime.record.pid);
     killProcessGroup(runtime.process, runtime.record.pid, 'SIGTERM');
     setTimeout(() => {
       const live = runtimes.get(id);
@@ -903,6 +922,7 @@ export function forceKillAllSpawned(cwd?: string): void {
   for (const [_id, runtime] of runtimes.entries()) {
     if (cwd && runtime.record.cwd !== cwd) continue;
     runtime.stopping = true;
+    reapOwnedToolProcesses(runtime.record.pid);
     if (runtime.detached) {
       if (runtime.record.pid && isProcessAlive(runtime.record.pid)) {
         killPidGroup(runtime.record.pid, 'SIGKILL');
@@ -985,6 +1005,7 @@ export function reconcileSpawnedAgents(cwd: string, sessionId: string): number {
     // This covers harness crash-restart: agent process already exited but the
     // close handler never fired because runtimes was lost.
     if (agent.pid && !isProcessAlive(agent.pid)) {
+      reapOwnedToolProcesses(agent.pid);
       const preserve = activeRunId(cwd) === sessionId && !agent.stopRequested;
       const failure = reclaimSandbox(cwd, agent.id, preserve ? agent : undefined);
       const ended: Partial<SpawnedAgent> = {

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, expect, it, vi } from 'vitest';
 import { execFile, spawn } from 'node:child_process';
 import { createServer as createHttpServer, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
@@ -9,6 +9,36 @@ import * as os from 'node:os';
 import { reservePort } from '../helpers/ports.js';
 
 const exec = promisify(execFile);
+/** Tool and host pids this file started. afterEach reaps them if a test fails early. */
+const recordedPids = new Set<number>();
+function recordPid(pid: number) {
+  if (Number.isInteger(pid) && pid > 1 && pid !== process.pid) recordedPids.add(pid);
+}
+function isAlive(pid: number) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false;
+    throw error;
+  }
+}
+const sh = (file: string) => `'${file}'`;
+afterEach(() => {
+  for (const pid of recordedPids) {
+    try {
+      process.kill(-pid, 'SIGKILL');
+    } catch {
+      /* not a process group leader */
+    }
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {
+      /* already gone */
+    }
+  }
+  recordedPids.clear();
+});
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-installed-'));
 const install = path.join(root, 'install');
 const project = path.join(root, 'project');
@@ -2789,3 +2819,288 @@ it('runs the packaged journey from shared storage to archived acceptance and the
     await new Promise<void>((resolve) => provider.close(() => resolve()));
   }
 }, 120_000);
+
+async function readPidLines(file: string, count: number) {
+  let pids: number[] = [];
+  await vi.waitFor(
+    () => {
+      pids = fs.readFileSync(file, 'utf8').trim().split(/\s+/).map(Number);
+      expect(pids).toHaveLength(count);
+      expect(pids.every((pid) => Number.isInteger(pid) && pid > 1)).toBe(true);
+    },
+    { timeout: 15_000 }
+  );
+  for (const pid of pids) recordPid(pid);
+  return pids;
+}
+
+it('reaps owned tool processes when a project aborts a live peer', async () => {
+  await command('--start');
+  await command('abort').catch(() => {});
+  const pidFile = path.join(root, 'abort-tool-pids');
+  fs.rmSync(pidFile, { force: true });
+  const provider = createHttpServer(async (req, res) => {
+    for await (const _chunk of req) {
+      /* consume */
+    }
+    writeTurn(res, [
+      bash(
+        'hold',
+        `echo $$ > ${sh(pidFile)}; sleep 120 & echo $! >> ${sh(pidFile)}; sleep 120 & echo $! >> ${sh(pidFile)}; echo READY; wait`,
+        150
+      ),
+    ]);
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  try {
+    await command('run', 'start', '--goal', 'Reap tools on abort');
+    await command('run', 'join');
+    await command('task', 'create', '--title', 'Held by a live tool');
+    await command(
+      'spawn',
+      '--task-id',
+      'task-1',
+      '--name',
+      'Holder',
+      '--model',
+      'fixture/fixture',
+      'Hold a bash tool'
+    );
+    const id = spawnedId((await command('spawn', 'list')).stdout, 'Holder');
+    expect(id).toBeTruthy();
+    const peer = await peerPid(command, id!);
+    recordPid(peer);
+    await vi.waitFor(
+      async () => expect((await command('ps', 'logs', id!)).stdout).toContain('READY'),
+      { timeout: 15_000 }
+    );
+    const pids = await readPidLines(pidFile, 3);
+    expect(pids).not.toContain(peer);
+    expect(new Set(pids).size).toBe(3);
+    for (const pid of pids) expect(isAlive(pid), `tool pid ${pid}`).toBe(true);
+    await command('abort');
+    for (const pid of pids) expect(isAlive(pid), `tool pid ${pid}`).toBe(false);
+    expect(fs.existsSync(path.join(project, '.swarm', 'workspaces', `worker-${id}`))).toBe(false);
+  } finally {
+    await command('abort').catch(() => {});
+    provider.closeAllConnections();
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
+  }
+}, 60_000);
+
+it('reaps a killed peer tool process before saving the handoff candidate and removing the sandbox', async () => {
+  await command('--start');
+  await command('abort').catch(() => {});
+  const pidFile = path.join(root, 'crash-tool-pid');
+  const marker = path.join(root, 'orphan-marker');
+  fs.rmSync(pidFile, { force: true });
+  fs.rmSync(marker, { force: true });
+  const provider = createHttpServer(async (req, res) => {
+    for await (const _chunk of req) {
+      /* consume */
+    }
+    writeTurn(res, [
+      bash(
+        'edit',
+        `echo $$ > ${sh(pidFile)}; printf '%s\n' kept > kept.txt; echo "$PI_SWARM_PEER_PID" > peer.txt; while kill -0 "$PI_SWARM_PEER_PID" 2>/dev/null; do sleep 0.05; done; sleep 1; printf '%s\n' leaked > leaked-after-death.txt; printf '%s\n' orphan > ${sh(marker)}; sleep 90`,
+        150
+      ),
+    ]);
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  try {
+    await command('run', 'start', '--goal', 'Reap before the candidate', '--max-steps', '20');
+    await command('run', 'join');
+    await command('task', 'create', '--title', 'Unfinished edit');
+    await command('task', 'claim', 'task-1');
+    await command(
+      'spawn',
+      '--task-id',
+      'task-1',
+      '--name',
+      'Editor',
+      '--model',
+      'fixture/fixture',
+      'Leave a candidate while a tool waits'
+    );
+    const id = spawnedId((await command('spawn', 'list')).stdout, 'Editor');
+    expect(id).toBeTruthy();
+    const sandbox = path.join(project, '.swarm', 'workspaces', `worker-${id}`);
+    const peer = await peerPid(command, id!);
+    recordPid(peer);
+    await vi.waitFor(
+      () => {
+        expect(fs.readFileSync(path.join(sandbox, 'peer.txt'), 'utf8').trim()).toBe(String(peer));
+        expect(fs.readFileSync(path.join(sandbox, 'kept.txt'), 'utf8')).toBe('kept\n');
+      },
+      { timeout: 15_000 }
+    );
+    const [tool] = await readPidLines(pidFile, 1);
+    expect(tool).not.toBe(peer);
+    expect(isAlive(tool)).toBe(true);
+    process.kill(peer, 'SIGKILL');
+    let toolDeadWhileSandboxRemained = false;
+    const deadline = Date.now() + 10_000;
+    let sandboxGone = false;
+    while (Date.now() < deadline) {
+      sandboxGone = !fs.existsSync(sandbox);
+      if (!isAlive(tool) && !sandboxGone) toolDeadWhileSandboxRemained = true;
+      if (sandboxGone) break;
+      await sleep(5);
+    }
+    expect(sandboxGone).toBe(true);
+    expect(isAlive(tool), `tool pid ${tool}`).toBe(false);
+    expect(toolDeadWhileSandboxRemained).toBe(true);
+    const shown = (await command('candidate', 'show', 'latest', '--task', 'task-1')).stdout;
+    expect(shown).toContain('"status":"unverified"');
+    expect(shown).toContain('kept.txt');
+    expect(shown).toContain('kept');
+    expect(shown).not.toContain('leaked-after-death.txt');
+    await sleep(1500);
+    expect(fs.existsSync(marker)).toBe(false);
+    expect(isAlive(tool)).toBe(false);
+  } finally {
+    await command('abort').catch(() => {});
+    provider.closeAllConnections();
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
+  }
+}, 60_000);
+
+it('reaps one project without stopping a successor, another project, or a host process', async () => {
+  await command('--start');
+  await command('abort').catch(() => {});
+  const other = path.join(root, 'reap-other-project');
+  await initRepo(other);
+  const deps = path.join(project, 'node_modules');
+  fs.mkdirSync(deps, { recursive: true });
+  fs.writeFileSync(path.join(deps, 'keep.txt'), 'host dependency\n');
+  const host = spawn('sleep', ['120'], { cwd: deps, detached: true, stdio: 'ignore' });
+  host.unref();
+  recordPid(host.pid!);
+  const otherPidFile = path.join(root, 'other-tool-pids');
+  const predPidFile = path.join(root, 'pred-tool-pid');
+  const successorPidFile = path.join(root, 'successor-tool-pid');
+  for (const file of [otherPidFile, predPidFile, successorPidFile])
+    fs.rmSync(file, { force: true });
+  const otherCommand = (...args: string[]) =>
+    exec(process.execPath, [cli, ...args], { cwd: other, env, timeout: 30_000 });
+  const provider = createHttpServer(async (req, res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    if (raw.includes('Hold the other project'))
+      return writeTurn(res, [
+        bash(
+          'other',
+          `echo $$ > ${sh(otherPidFile)}; sleep 120 & echo $! >> ${sh(otherPidFile)}; echo OTHER_READY; wait`,
+          150
+        ),
+      ]);
+    if (raw.includes('Automatic Handoff for task-1'))
+      return writeTurn(res, [
+        bash(
+          'successor',
+          `pi-messenger-swarm run join && pi-messenger-swarm task claim task-1 && echo $$ > ${sh(successorPidFile)} && echo SUCCESSOR_ALIVE && sleep 90`,
+          150
+        ),
+      ]);
+    writeTurn(res, [
+      bash(
+        'pred',
+        `pi-messenger-swarm run join && pi-messenger-swarm task claim task-1 && echo $$ > ${sh(predPidFile)} && printf '%s\n' kept > kept.txt && echo PRED_READY && sleep 90`,
+        150
+      ),
+    ]);
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  try {
+    await command('run', 'start', '--goal', 'Reap only this project', '--max-steps', '40');
+    await command('run', 'join');
+    await command('task', 'create', '--title', 'Predecessor');
+    await otherCommand('run', 'start', '--goal', 'Untouched project');
+    await otherCommand('run', 'join');
+    await otherCommand('task', 'create', '--title', 'Other project task');
+    await command(
+      'spawn',
+      '--task-id',
+      'task-1',
+      '--name',
+      'Predecessor',
+      '--model',
+      'fixture/fixture',
+      'Hold until killed'
+    );
+    await otherCommand(
+      'spawn',
+      '--task-id',
+      'task-1',
+      '--name',
+      'Neighbour',
+      '--model',
+      'fixture/fixture',
+      'Hold the other project'
+    );
+    const predId = spawnedId((await command('spawn', 'list')).stdout, 'Predecessor');
+    const otherId = spawnedId((await otherCommand('spawn', 'list')).stdout, 'Neighbour');
+    expect(predId).toBeTruthy();
+    expect(otherId).toBeTruthy();
+    const predPeer = await peerPid(command, predId!);
+    const otherPeer = await peerPid(otherCommand, otherId!);
+    recordPid(predPeer);
+    recordPid(otherPeer);
+    await vi.waitFor(
+      async () => expect((await command('ps', 'logs', predId!)).stdout).toContain('PRED_READY'),
+      { timeout: 20_000 }
+    );
+    await vi.waitFor(
+      async () =>
+        expect((await otherCommand('ps', 'logs', otherId!)).stdout).toContain('OTHER_READY'),
+      { timeout: 20_000 }
+    );
+    const [predTool] = await readPidLines(predPidFile, 1);
+    const otherTools = await readPidLines(otherPidFile, 2);
+    expect(isAlive(predTool)).toBe(true);
+    for (const pid of otherTools) expect(isAlive(pid)).toBe(true);
+    expect(isAlive(host.pid!)).toBe(true);
+    const predSandbox = path.join(project, '.swarm', 'workspaces', `worker-${predId}`);
+    process.kill(predPeer, 'SIGKILL');
+    let successorId = '';
+    await vi.waitFor(
+      async () => {
+        successorId = JSON.parse((await command('run', 'status')).stdout).handoffs['task-1']
+          ?.successor;
+        expect(successorId).toBeTruthy();
+        expect((await command('ps', 'logs', successorId)).stdout).toContain('SUCCESSOR_ALIVE');
+      },
+      { timeout: 20_000 }
+    );
+    const successorPeer = await peerPid(command, successorId);
+    recordPid(successorPeer);
+    const [successorTool] = await readPidLines(successorPidFile, 1);
+    expect(fs.existsSync(predSandbox)).toBe(false);
+    expect(isAlive(predTool), `predecessor tool ${predTool}`).toBe(false);
+    expect(isAlive(successorPeer)).toBe(true);
+    expect(isAlive(successorTool)).toBe(true);
+    expect(successorTool).not.toBe(predTool);
+    for (const pid of [otherPeer, ...otherTools, host.pid!]) expect(isAlive(pid)).toBe(true);
+    expect((await command('candidate', 'show', 'latest', '--task', 'task-1')).stdout).toContain(
+      'kept.txt'
+    );
+    await command('abort');
+    expect(isAlive(successorPeer)).toBe(false);
+    expect(isAlive(successorTool)).toBe(false);
+    for (const pid of [otherPeer, ...otherTools, host.pid!]) expect(isAlive(pid)).toBe(true);
+    expect(fs.readFileSync(path.join(deps, 'keep.txt'), 'utf8')).toBe('host dependency\n');
+    expect(fs.existsSync(path.join(other, '.swarm', 'workspaces', `worker-${otherId}`))).toBe(true);
+  } finally {
+    await command('abort').catch(() => {});
+    await otherCommand('abort').catch(() => {});
+    provider.closeAllConnections();
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
+  }
+}, 90_000);

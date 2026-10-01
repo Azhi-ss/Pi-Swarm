@@ -1,4 +1,5 @@
 import { type ChildProcess } from 'node:child_process';
+import * as fs from 'node:fs';
 import { removeWorktree } from './worktree/index.js';
 import { normalizeCwd } from '../store/shared.js';
 
@@ -42,6 +43,99 @@ export function forceKillProcessGroup(pid: number, signal: NodeJS.Signals = 'SIG
     process.kill(pid, signal);
   } catch {
     // Process already dead
+  }
+}
+
+function procAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function procStat(pid: number): { ppid: number; pgrp: number } | undefined {
+  try {
+    const data = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const fields = data.slice(data.lastIndexOf(')') + 2).split(' ');
+    const ppid = Number(fields[1]);
+    const pgrp = Number(fields[2]);
+    if (!ppid || !pgrp) return;
+    return { ppid, pgrp };
+  } catch {
+    return;
+  }
+}
+
+function carriesPeer(pid: number, peerPid: number): boolean {
+  try {
+    return fs
+      .readFileSync(`/proc/${pid}/environ`)
+      .toString('latin1')
+      .split('\0')
+      .includes(`PI_SWARM_PEER_PID=${peerPid}`);
+  } catch {
+    return false;
+  }
+}
+
+function toolGroupLeaders(peerPid: number): number[] {
+  const self = procStat(process.pid);
+  const peer = procStat(peerPid);
+  const peerAlive = procAlive(peerPid);
+  const leaders = new Set<number>();
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync('/proc');
+  } catch {
+    return [];
+  }
+  const stats = new Map<number, { ppid: number; pgrp: number }>();
+  for (const name of names) {
+    if (!/^\d+$/.test(name)) continue;
+    const pid = Number(name);
+    const stat = procStat(pid);
+    if (stat) stats.set(pid, stat);
+  }
+  for (const [pid, stat] of stats) {
+    if (pid <= 1 || pid === process.pid || pid === peerPid) continue;
+    if (self && stat.pgrp === self.pgrp) continue;
+    if (peer && stat.pgrp === peer.pgrp) continue;
+    if (stat.pgrp !== pid) continue;
+    if (!carriesPeer(pid, peerPid)) continue;
+    if (stat.ppid === peerPid || (!peerAlive && !carriesPeer(stat.ppid, peerPid))) leaders.add(pid);
+  }
+  return [...leaders];
+}
+
+/**
+ * Reap bash tool process groups this peer started. Waits until they exit.
+ * Do not call while holding the project run lock.
+ * Commands that call setsid or setpgid leave the group and escape.
+ */
+export function reapOwnedToolProcesses(peerPid?: number): void {
+  if (!peerPid || peerPid <= 1 || peerPid === process.pid || process.platform === 'win32') return;
+  const leaders = toolGroupLeaders(peerPid);
+  if (!leaders.length) return;
+  const members = new Set<number>(leaders);
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync('/proc');
+  } catch {
+    names = [];
+  }
+  for (const name of names) {
+    if (!/^\d+$/.test(name)) continue;
+    const pid = Number(name);
+    const stat = procStat(pid);
+    if (stat && leaders.includes(stat.pgrp)) members.add(pid);
+  }
+  for (const leader of leaders) forceKillProcessGroup(leader);
+  const deadline = Date.now() + 2_000;
+  const pending = () => [...members].filter((pid) => procAlive(pid));
+  while (pending().length && Date.now() < deadline) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
   }
 }
 
@@ -95,7 +189,7 @@ export class ProcessManager {
         w.status = 'timeout';
         w.error = `Process timed out after ${timeoutMs}ms`;
 
-        // Force kill process group
+        reapOwnedToolProcesses(w.pid);
         forceKillProcessGroup(w.pid, 'SIGKILL');
         const p = this.processes.get(worker.id);
         if (p) {
@@ -172,6 +266,7 @@ export class ProcessManager {
 
     this.clearTimer(worker.id);
 
+    reapOwnedToolProcesses(worker.pid);
     forceKillProcessGroup(worker.pid, signal);
     const proc = this.processes.get(worker.id);
     if (proc) {
