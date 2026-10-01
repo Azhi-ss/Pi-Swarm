@@ -94,6 +94,12 @@ export function withRunLock<T>(cwd: string, operation: () => T): T {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       try {
         const owner = Number(fs.readFileSync(path.join(lock, 'pid'), 'utf8'));
+        // pid 0 is the caller's process group: kill(0, 0) succeeds, so an empty
+        // pid file would keep this lock forever.
+        if (!Number.isInteger(owner) || owner <= 1) {
+          fs.rmSync(lock, { recursive: true, force: true });
+          continue;
+        }
         try {
           process.kill(owner, 0);
         } catch (e) {
