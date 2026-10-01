@@ -1005,7 +1005,7 @@ export function reconcileSpawnedAgents(cwd: string, sessionId: string): number {
       });
       // A runtime adopted after a restart would otherwise still list the peer as running.
       const adopted = runtimes.get(agent.id);
-      if (adopted) {
+      if (adopted?.detached) {
         Object.assign(adopted.record, ended);
         removeLiveWorker(cwd, agent.taskId || spawnLiveKey(agent.id));
       }
