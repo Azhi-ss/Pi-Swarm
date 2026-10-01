@@ -16,6 +16,13 @@ function recordPid(pid: number) {
 }
 function isAlive(pid: number) {
   try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const state = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0];
+    if (state === 'Z' || state === 'X') return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+  }
+  try {
     process.kill(pid, 0);
     return true;
   } catch (error) {

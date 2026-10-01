@@ -1,4 +1,14 @@
+import { readFileSync } from 'node:fs';
+
 export function isProcessAlive(pid: number): boolean {
+  try {
+    // kill(pid, 0) is true for a zombie until its parent reaps it.
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const state = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0];
+    if (state === 'Z' || state === 'X') return false;
+  } catch {
+    // No /proc (or the pid is already gone): fall through to the signal check.
+  }
   try {
     process.kill(pid, 0);
     return true;

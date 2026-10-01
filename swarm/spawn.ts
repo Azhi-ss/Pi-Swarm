@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
 import { generateMemorableName } from '../lib.js';
+import { isProcessAlive } from '../lib/format.js';
 import { createProgress, parseJsonlLine, updateProgress } from './progress.js';
 import { removeLiveWorker, updateLiveWorker } from './live-progress.js';
 import type { SpawnRequest, SpawnedAgent } from './types.js';
@@ -1034,15 +1035,6 @@ export function cleanupExitedSpawned(cwd: string, sessionId: string): number {
     finalized++;
   }
   return finalized;
-}
-
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 export function reconcileSpawnedAgents(cwd: string, sessionId: string): number {
