@@ -130,6 +130,44 @@ _Avoid_: Checkpoint, backup, partial result (it is never a Verified fact)
 A task-local pause of Automatic Handoff after three consecutive startup/takeover failures across Successor identities. The errors are kept, the Delegator is notified, other tasks continue, and verification attempts are untouched; only an explicit `handoff resume` ends it.
 _Avoid_: Dead end, Fast Pruning, circuit breaker (none of these apply to takeover failures)
 
+### Admission & Width
+
+**Width**:
+The count of live Peer Nodes in the active Swarm Run.
+_Avoid_: Concurrency, worker count, parallelism
+
+**Width Cap**:
+The most live peers a Run may have: the minimum of the Run Width Cap (`concurrency`, fixed at `run start`), the Host Width Cap (`maxConcurrentSpawns`, default `min(6, max(1, availableParallelism − 1))`), the Budget Width (`floor(remaining steps / 5)`), and 50 port slots. A configured host cap above 50 counts as 50.
+_Avoid_: Max workers, pool size, orchestrator quota
+
+**Width Limiter**:
+Which of those caps, or a stopped state, is binding: `demand`, `run-cap`, `host-cap`, `budget`, `port-slots`, `acceptance`, `breaker`, or `stopped`. The last one that holds wins.
+_Avoid_: Error code, throttle reason
+
+**Claimable Task**:
+A task a new peer may be bound to: status `todo`, dependencies `done` or `verified`, no Handoff Suspension, no live peer bound to it, no unexpired lease held by a live owner, and not a member of a finished Alternative Group.
+_Avoid_: Ready task, open task, assigned task
+
+**Open Demand**:
+Claimable Tasks that do not already have a bound peer still belonging to the Run.
+_Avoid_: Backlog, queue depth
+
+**Idle Width**:
+Live peers that do not currently hold a task lease.
+_Avoid_: Idle workers, spare capacity
+
+**Demand Fill**:
+Opt-in at `run start --demand-fill`. After Automatic Handoff, the service starts peers for Open Demand up to the Width Cap. The default is off, so idle width does not start peers by itself.
+_Avoid_: Autoscaling, orchestrator, minimum peers per task
+
+**Alternative Group**:
+Hypotheses linked by `task create --alternative-of`. They compete; one Direct Verified Merge finishes the group.
+_Avoid_: Branch, variant, duplicate task
+
+**Superseded**:
+The terminal state of a losing Alternative Group member. Its peer is stopped, it is not Claimable, it is neither `dead_end` nor verified, and it does not enter the Graveyard.
+_Avoid_: Failed, pruned, cancelled
+
 ### Observation & Control
 
 **Context Admission**:

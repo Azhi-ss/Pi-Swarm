@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [Unreleased]
+
+Work on `main` after `v0.26.3`. Not published.
+
+### Features
+
+* One Width Cap from the Run record and the live Host Width Cap, shown on the Blackboard, `run status`, and `status`.
+* Run-bound peers start only for a Claimable Task. The width check and the start share the Project run lock.
+* Opt-in Demand Fill (`run start --demand-fill`) fills Open Demand after Automatic Handoff. It stays off unless requested.
+* Alternative Groups (`task create --alternative-of`). A Direct Verified Merge Supersedes the other hypotheses and stops their peers.
+
+### Bug Fixes
+
+* Critical Notifications are delivered to a live Pi recipient, and a duplicate delivery is handled once.
+* Handoff Candidates survive an unexpected exit and are reverified before integration. A failed save keeps the Sandbox and does not block the rest of the recovery tick.
+* Automatic Handoff stays inside the original budget and verification history, and three takeover failures suspend that task.
+* Abort and crash recovery reap the peer's tool processes before saving a candidate or deleting the Sandbox.
+* A verification timeout kills the whole process group, not only the shell.
+* Sandboxes (`.swarm/`) and runtime data (`.pi/messenger/`) stay out of the host git status.
+
+Tags `v0.26.0` through `v0.26.3` bumped the package version and are not itemized here.
+
 ### [0.25.20](https://github.com/monotykamary/pi-messenger-swarm/compare/v0.25.19...v0.25.20) (2026-06-04)
 
 
