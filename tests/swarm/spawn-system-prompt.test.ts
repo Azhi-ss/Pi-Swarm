@@ -30,6 +30,8 @@ import { spawnSubagent, clearSpawnStateForTests } from '../../swarm/spawn.js';
 class FakeProcess extends EventEmitter {
   stdout = new EventEmitter();
   stderr = new EventEmitter();
+  // A live pid: a started peer always has one, and reconciliation keeps it running.
+  pid = process.pid;
   exitCode: number | null = null;
   kill = vi.fn();
 }
