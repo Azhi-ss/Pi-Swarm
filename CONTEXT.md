@@ -108,6 +108,28 @@ _Avoid_: Pull request, code review, manual merge
 The deterministic conflict resolution protocol where a peer whose patch collides with the evolving `main` branch is mechanically bounced back into its Sandbox to rebase onto latest HEAD and re-verify, rather than debating conflicts in natural language.
 _Avoid_: Merge conflict discussion, manual merge resolution
 
+### Recovery & Signaling
+
+**Critical Notification**:
+An urgent message the service actively delivers into a live Pi recipient as a steer with a triggered turn: verification failures and merge conflicts to the responsible Peer Node, all-dead evidence and Handoff Suspension to the Delegator. It carries Project, run, recipient, task and Incident, and moves from `pending` to `enqueued` to `handled` only after a model turn consumes it. Ordinary Peer Messages stay pull-based.
+_Avoid_: Alert, push message, feed event (a feed entry or generated message is not delivery)
+
+**Incident**:
+The stable identifier of one occurrence a Critical Notification reports, such as `verif-task-1-2` or `conflict-task-1-1`. Repeated or delayed deliveries of the same Incident are one notification and cause at most one handling.
+_Avoid_: Event, alert ID, message ID
+
+**Successor**:
+A Peer Node that Automatic Handoff starts in the same Project and run after the intended peer exits with eligible unfinished work. It inherits the remaining budget, concurrency limits, verification history and normal claim/Lease rules, and counts as taken over only once it claims the task.
+_Avoid_: Replacement worker, respawn, retry
+
+**Handoff Candidate**:
+Recoverable unverified changes, both tracked edits and new files, preserved from an unexpectedly exited peer's Sandbox before cleanup. It is bound to its originating Project, run, task and peer, and a Successor inspects and selectively restores it into its own Sandbox; only normal verification can integrate it.
+_Avoid_: Checkpoint, backup, partial result (it is never a Verified fact)
+
+**Handoff Suspension**:
+A task-local pause of Automatic Handoff after three consecutive startup/takeover failures across Successor identities. The errors are kept, the Delegator is notified, other tasks continue, and verification attempts are untouched; only an explicit `handoff resume` ends it.
+_Avoid_: Dead end, Fast Pruning, circuit breaker (none of these apply to takeover failures)
+
 ### Observation & Control
 
 **Context Admission**:
