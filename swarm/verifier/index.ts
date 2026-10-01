@@ -1,4 +1,4 @@
-import { spawnSync, type SpawnSyncOptionsWithStringEncoding } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
@@ -46,16 +46,19 @@ export function runVerification(
 
   try {
     // A timeout kills only the shell. Its own process group lets the whole
-    // tree be reaped, including background processes left after a normal exit.
-    const res = spawnSync(command, {
+    // tree be reaped, deliberately including background processes left after a
+    // normal exit. Commands that call setsid/setpgid leave the group and escape.
+    const options = {
       cwd,
       shell: true,
       timeout: timeoutMs,
       maxBuffer: 4 * 1024 * 1024,
-      encoding: 'utf-8',
+      encoding: 'utf-8' as const,
       env: process.env,
+      // spawnSync honors detached at runtime; its option types omit it.
       detached: process.platform !== 'win32',
-    } as SpawnSyncOptionsWithStringEncoding);
+    };
+    const res = spawnSync(command, options);
     if (res.pid && process.platform !== 'win32') {
       try {
         process.kill(-res.pid, 'SIGKILL');
