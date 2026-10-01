@@ -28,8 +28,11 @@ function recordedPid(dir: string) {
   return pid;
 }
 
-const gone = (pid: number) =>
-  vi.waitFor(() => expect(() => process.kill(pid, 0)).toThrow(/ESRCH/), { timeout: 2000 });
+const gone = async (pid: number) => {
+  await vi.waitFor(() => expect(() => process.kill(pid, 0)).toThrow(/ESRCH/), { timeout: 2000 });
+  // A reaped pid may be reused; only a still-running test process is killed.
+  pids.splice(pids.indexOf(pid), 1);
+};
 
 const writePid = `require('fs').writeFileSync('pid', String(process.pid))`;
 
