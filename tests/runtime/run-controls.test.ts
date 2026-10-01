@@ -188,14 +188,17 @@ it('scopes budget, emergency stop, and supervision to the owning run', async () 
   const patch = path.join(projectA, '.pi', 'messenger', 'artifacts', 'task-1.patch');
   const hadPatch = fs.existsSync(patch);
 
+  await invoke(projectA, ['task', 'create', '--title', 'Admitted peer'], as('Delegator'));
+  await invoke(projectB, ['task', 'create', '--title', 'Peer B work'], as('Delegator'));
+  await invoke(projectB, ['task', 'create', '--title', 'Peer B later'], as('Delegator'));
   const spawnedA = await invoke(
     projectA,
-    ['spawn', '--name', 'PeerA', 'Work in A'],
+    ['spawn', '--task-id', 'task-2', '--name', 'PeerA', 'Work in A'],
     as('Delegator')
   );
   const spawnedB = await invoke(
     projectB,
-    ['spawn', '--name', 'PeerB', 'Work in B'],
+    ['spawn', '--task-id', 'task-1', '--name', 'PeerB', 'Work in B'],
     as('Delegator')
   );
   expect(spawnedA.stdout).toContain('Spawned');
@@ -299,7 +302,7 @@ it('scopes budget, emergency stop, and supervision to the owning run', async () 
 
   const spawnedLater = await invoke(
     projectB,
-    ['spawn', '--name', 'PeerB2', 'Admitted after A stopped'],
+    ['spawn', '--task-id', 'task-2', '--name', 'PeerB2', 'Admitted after A stopped'],
     as('Delegator')
   );
   expect(spawnedLater.stdout).toContain('Spawned');
@@ -355,7 +358,9 @@ it('scopes budget, emergency stop, and supervision to the owning run', async () 
   expect((await invoke(projectA, ['status'], as('Later'))).stdout).toContain(
     'Stop reason: Global step budget exceeded (5/5 steps)'
   );
-  await expect(invoke(projectA, ['spawn', 'revived peer'], as('Later'))).rejects.toMatchObject({
-    stderr: expect.stringContaining('No active Swarm Run'),
+  await expect(
+    invoke(projectA, ['spawn', '--force', 'revived peer'], as('Later'))
+  ).rejects.toMatchObject({
+    stderr: expect.stringContaining('Run aborted'),
   });
 }, 120_000);

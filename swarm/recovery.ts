@@ -22,7 +22,7 @@ import { ensureSessionChannel } from '../channel.js';
 import { criticalHeader, enqueueCritical } from './notifications.js';
 import { generateAttributionBrief } from './watchdog/brief.js';
 import { acceptanceEvidence, executeRun, readyForAcceptance } from './handlers/run.js';
-import { computeWidth } from './width.js';
+import { claimableRejection, computeWidth, isDeferredAdmission } from './width.js';
 
 /** A failed check reads external evidence the task log does not contain. */
 const FAILED_ACCEPTANCE_RETRY_MS = 2_000;
@@ -183,6 +183,7 @@ export function recoverRun(cwd: string): void {
       }
       const width = computeWidth(cwd, current);
       if (width.live >= width.cap) return;
+      if (current.acceptanceOwner && isProcessAlive(current.acceptanceOwner)) return;
       if (task.claimed_by)
         appendTaskEvent(cwd, run.id, {
           taskId: task.id,
@@ -190,6 +191,8 @@ export function recoverRun(cwd: string): void {
           agent: task.claimed_by,
           timestamp: new Date().toISOString(),
         });
+      // Same Claimable Task gate as an explicit spawn. Not a takeover failure.
+      if (claimableRejection(cwd, current, task.id)) return;
       const candidates = listCandidates(cwd, run.id).filter((c) => c.taskId === task.id);
       const context = `Automatic Handoff for ${task.id}. Original goal: ${current.goal}. Remaining budget: ${current.maxSteps - current.consumedSteps}. Verification history: ${JSON.stringify(task.last_verification_failure || null)}. Unverified Handoff Candidates: ${JSON.stringify(candidates)}. Use candidate show, then selectively restore in your own Sandbox; normal verification is mandatory.`;
       try {
@@ -210,6 +213,8 @@ export function recoverRun(cwd: string): void {
         h.startedAt = peer.startedAt;
         h.takenOver = false;
       } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (isDeferredAdmission(message)) return;
         h.failures++;
         h.errors.push(String(error));
         if (h.failures >= 3) h.suspended = true;

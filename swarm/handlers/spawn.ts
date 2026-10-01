@@ -16,7 +16,8 @@ import {
 import type { SpawnRequest } from '../types.js';
 import { formatRoleLabel } from '../labels.js';
 import { getCircuitBreaker } from '../circuit-breaker/index.js';
-import { withRunLock } from '../run-store.js';
+import { isProcessAlive } from '../../lib.js';
+import { readRun, withRunLock } from '../run-store.js';
 import { computeWidth, widthFullMessage } from '../width.js';
 
 export function executeSpawn(
@@ -174,10 +175,9 @@ function spawnCreate(
     });
   }
 
-  // Guardrail: if the user has ready tasks but forgot --task-id, warn them
-  // instead of letting an unbound agent float and accidentally claim/create
-  // tasks that collide with the coordinator's intent.
-  if (!params.taskId && !params.force) {
+  // Without an active Run, an unbound spawn still warns when ready tasks exist.
+  // Under an active Run the Claimable Task gate rejects it, including --force.
+  if (!readRun(cwd) && !params.taskId && !params.force) {
     const ready = taskStore.getReadyTasks(cwd, sessionId);
     if (ready.length > 0) {
       const list = ready.map((t) => `  ${t.id}: ${t.title}`).join('\n');
@@ -201,6 +201,40 @@ function spawnCreate(
   // and making the whole swarm appear stuck.
   // Recheck under the Project Run lock and start before releasing it.
   return withRunLock(cwd, () => {
+    const run = readRun(cwd);
+    if (run && run.id === sessionId) {
+      if (run.status === 'aborted') {
+        return result('Error: Run aborted; peer admission is stopped.', {
+          mode: 'spawn',
+          error: 'stopped',
+        });
+      }
+      if (run.status !== 'active') {
+        return result('Error: Run archived; peer admission is stopped.', {
+          mode: 'spawn',
+          error: 'stopped',
+        });
+      }
+      if (run.consumedSteps >= run.maxSteps) {
+        return result('Error: Step budget exhausted; peer admission is stopped.', {
+          mode: 'spawn',
+          error: 'breaker',
+        });
+      }
+      if (run.acceptanceOwner && isProcessAlive(run.acceptanceOwner)) {
+        return result('Error: Overall Goal Acceptance is running; peer admission is paused.', {
+          mode: 'spawn',
+          error: 'acceptance',
+        });
+      }
+    }
+    if (getCircuitBreaker(cwd, sessionId).isTripped()) {
+      return result('Error: Circuit breaker is tripped. Spawning new agents is locked.', {
+        mode: 'spawn',
+        error: 'circuit_broken',
+      });
+    }
+
     const width = computeWidth(cwd);
     if (width.live >= width.cap) {
       return result(`Error: ${widthFullMessage(width)}`, {
@@ -283,20 +317,27 @@ function spawnCreate(
       name: params.name,
     };
 
-    const record = spawnSubagent(cwd, request, sessionId, state.currentChannel);
-    const roleLabel = formatRoleLabel(record.role);
-    logFeedEvent(
-      cwd,
-      state.agentName,
-      'message',
-      undefined,
-      `spawned ${record.name} (${roleLabel})`,
-      state.currentChannel
-    );
+    try {
+      const record = spawnSubagent(cwd, request, sessionId, state.currentChannel);
+      const roleLabel = formatRoleLabel(record.role);
+      logFeedEvent(
+        cwd,
+        state.agentName,
+        'message',
+        undefined,
+        `spawned ${record.name} (${roleLabel})`,
+        state.currentChannel
+      );
 
-    return result(`🚀 Spawned ${record.name} (${record.id}) as ${roleLabel}.`, {
-      mode: 'spawn',
-      agent: record,
-    });
+      return result(`🚀 Spawned ${record.name} (${record.id}) as ${roleLabel}.`, {
+        mode: 'spawn',
+        agent: record,
+      });
+    } catch (err) {
+      return result(`Error: ${err instanceof Error ? err.message : String(err)}`, {
+        mode: 'spawn',
+        error: 'spawn_failed',
+      });
+    }
   });
 }

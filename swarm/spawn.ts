@@ -1,5 +1,5 @@
 import { preserveCandidate } from './candidates.js';
-import { computeWidth, widthFullMessage } from './width.js';
+import { claimableRejection, computeWidth, widthFullMessage } from './width.js';
 import { readRun } from './run-store.js';
 import { messengerDirs, activeRunId, peerBelongsToProject } from '../project.js';
 import * as fs from 'node:fs';
@@ -536,16 +536,24 @@ export function spawnSubagent(
   sessionId: string,
   inheritedChannel?: string
 ): SpawnedAgent {
+  const run = readRun(cwd);
+  if (run && run.id !== sessionId) throw new Error('Run is no longer eligible for a peer.');
+  if (run?.status === 'aborted') throw new Error('Run aborted; peer admission is stopped.');
+  if (run && run.status !== 'active') throw new Error('Run archived; peer admission is stopped.');
+  if (run && run.consumedSteps >= run.maxSteps)
+    throw new Error('Step budget exhausted; peer admission is stopped.');
+  if (run?.acceptanceOwner && isProcessAlive(run.acceptanceOwner))
+    throw new Error('Overall Goal Acceptance is running; peer admission is paused.');
   if (getCircuitBreaker(cwd, sessionId).isTripped()) {
     throw new Error('Circuit breaker is tripped: spawn rejected');
   }
-  const run = readRun(cwd);
-  if (run && (run.id !== sessionId || run.status !== 'active' || run.consumedSteps >= run.maxSteps))
-    throw new Error('Run is no longer eligible for a peer.');
-  if (run?.acceptanceOwner && isProcessAlive(run.acceptanceOwner))
-    throw new Error('Overall Goal Acceptance is running; peer admission is paused.');
   const width = run && computeWidth(cwd, run);
   if (width && width.live >= width.cap) throw new Error(widthFullMessage(width));
+  // Re-checked under the caller's Project Run lock, immediately before start.
+  if (run && run.status === 'active') {
+    const reason = claimableRejection(cwd, run, request.taskId);
+    if (reason) throw new Error(reason);
+  }
   const id = randomUUID().slice(0, 8);
   const name = request.name?.trim() || generateMemorableName();
   const startedAt = new Date().toISOString();

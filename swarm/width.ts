@@ -1,5 +1,8 @@
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { loadConfig } from '../config.js';
 import { isProcessAlive } from '../lib.js';
+import { messengerDirs } from '../project.js';
 import { readRun, type SwarmRun } from './run-store.js';
 import { getRunningSpawnCount, listSpawned } from './spawn.js';
 import { getAllTasks, getReadyTasksForTasks } from './task-store/queries.js';
@@ -84,6 +87,70 @@ export function computeWidth(cwd: string, run: SwarmRun | undefined = readRun(cw
     fill: 'off',
     limiter,
   };
+}
+
+function registryOwnerLive(cwd: string, name: string): boolean {
+  try {
+    const registered = JSON.parse(
+      fs.readFileSync(path.join(messengerDirs(cwd).registry, `${name}.json`), 'utf8')
+    ) as { pid?: number };
+    return !!registered.pid && isProcessAlive(registered.pid);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Why `taskId` cannot be admitted, or null when it is Claimable.
+ * Finished Alternative Group membership is not applicable until #22.
+ */
+export function claimableRejection(
+  cwd: string,
+  run: SwarmRun,
+  taskId: string | undefined
+): string | null {
+  if (!taskId) return 'Spawn is not bound to a Claimable Task.';
+  const tasks = getAllTasks(cwd, run.id);
+  const task = tasks.find((item) => item.id === taskId);
+  if (!task) return `Task ${taskId} is not a Claimable Task.`;
+  if (run.handoffs[task.id]?.suspended) return `Task ${task.id} is suspended.`;
+  const peers = listSpawned(cwd, run.id, true);
+  const live = (peer: (typeof peers)[number]) =>
+    peer.status === 'running' && !!peer.pid && isProcessAlive(peer.pid);
+  if (peers.some((peer) => peer.taskId === task.id && live(peer)))
+    return `Task ${task.id} is claimed by a live owner.`;
+  if (
+    task.claimed_by &&
+    task.lease_expires_at &&
+    Date.parse(task.lease_expires_at) > Date.now() &&
+    (peers.some((peer) => peer.name === task.claimed_by && live(peer)) ||
+      registryOwnerLive(cwd, task.claimed_by))
+  )
+    return `Task ${task.id} is claimed by a live owner.`;
+  if (task.status !== 'todo')
+    return `Task ${task.id} is not a Claimable Task (status ${task.status}).`;
+  const done = new Set(
+    tasks
+      .filter((item) => item.status === 'done' || item.status === 'verified')
+      .map((item) => item.id)
+  );
+  const unmet = task.depends_on.filter((dep) => !done.has(dep));
+  if (unmet.length) return `Task ${task.id} has unmet dependencies (${unmet.join(', ')}).`;
+  return null;
+}
+
+/** Admission refusals that must not count as an Automatic Handoff takeover failure. */
+export function isDeferredAdmission(message: string): boolean {
+  return (
+    message.includes('Claimable Task') ||
+    message.includes('claimed by a live owner') ||
+    message.includes('unmet dependencies') ||
+    message.includes('is suspended') ||
+    message.includes('peer admission') ||
+    message.includes('Width Cap') ||
+    message.includes('Circuit breaker is tripped') ||
+    message.includes('no longer eligible')
+  );
 }
 
 export const formatWidth = (w: Width) =>

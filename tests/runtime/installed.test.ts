@@ -611,6 +611,12 @@ it('suspends only the failing task after three actual replacement startup failur
     },
     { timeout: 35_000, interval: 500 }
   );
+  await expect(
+    command('spawn', '--task-id', 'task-1', 'Do not admit a suspended task')
+  ).rejects.toMatchObject({
+    code: 1,
+    stderr: expect.stringContaining('is suspended'),
+  });
   const history = (await command('spawn', 'history')).stdout;
   await new Promise((resolve) => setTimeout(resolve, 1200));
   expect((await command('spawn', 'history')).stdout).toBe(history);
@@ -883,9 +889,10 @@ it('shares spawn admission between two installed service processes', async () =>
     // Two live callers cannot register one agent name at the same moment.
     await command('run', 'join');
     await second('run', 'join');
+    await command('task', 'create', '--title', 'Shared admission');
     const admissions = await Promise.allSettled([
-      command('spawn', '--model', 'fixture/fixture', 'Hold first worker'),
-      second('spawn', '--model', 'fixture/fixture', 'Hold second worker'),
+      command('spawn', '--task-id', 'task-1', '--model', 'fixture/fixture', 'Hold first worker'),
+      second('spawn', '--task-id', 'task-1', '--model', 'fixture/fixture', 'Hold second worker'),
     ]);
     expect(admissions.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
     expect(
@@ -963,6 +970,14 @@ const spawnedPids = (runId: string) => {
       pid: events.find((event) => event.id === spawned.id && event.agent.pid)?.agent.pid as number,
     }));
 };
+const spawnedEventCount = (runId: string) => {
+  const file = path.join(project, '.pi/messenger/agents', `${runId}.jsonl`);
+  if (!fs.existsSync(file)) return 0;
+  return fs
+    .readFileSync(file, 'utf8')
+    .split('\n')
+    .filter((line) => line.includes('"type":"spawned"')).length;
+};
 const pidAlive = (pid: number) => {
   try {
     process.kill(pid, 0);
@@ -1002,6 +1017,7 @@ it('admits exactly one spawn when two services race under the held run lock', as
     );
     await command('run', 'join');
     await second('run', 'join');
+    await command('task', 'create', '--title', 'Concurrent width');
     // Queue both admissions behind the real run lock. A width check outside
     // that lock passes in both services before either peer exists.
     while (true) {
@@ -1025,8 +1041,8 @@ it('admits exactly one spawn when two services race under the held run lock', as
     };
     let maxLive = 0;
     pending = Promise.allSettled([
-      command('spawn', '--model', 'fixture/fixture', 'Hold first worker'),
-      second('spawn', '--model', 'fixture/fixture', 'Hold second worker'),
+      command('spawn', '--task-id', 'task-1', '--model', 'fixture/fixture', 'Hold first worker'),
+      second('spawn', '--task-id', 'task-1', '--model', 'fixture/fixture', 'Hold second worker'),
     ]);
     watch = setInterval(() => {
       maxLive = Math.max(maxLive, livePeers());
@@ -1068,6 +1084,440 @@ it('admits exactly one spawn when two services race under the held run lock', as
     await new Promise<void>((resolve) => provider.close(() => resolve()));
   }
 }, 40_000);
+
+it('admits exactly one live peer when two services spawn the same Claimable Task under the held run lock', async () => {
+  await command('abort').catch(() => {});
+  const provider = createHttpServer(async (req) => {
+    for await (const _chunk of req) {
+      /* keep the admitted peer alive */
+    }
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  const second = await secondService();
+  const runLock = path.join(project, '.pi/messenger/run.lock');
+  let lockHeld = false;
+  let watch: ReturnType<typeof setInterval> | undefined;
+  const releaseLock = () => {
+    if (!lockHeld) return;
+    lockHeld = false;
+    fs.rmSync(runLock, { recursive: true, force: true });
+  };
+  let pending: Promise<PromiseSettledResult<{ stdout: string }>[]> | undefined;
+  try {
+    setHostWidthCap(5);
+    await command('--start');
+    await second('--start');
+    const started = JSON.parse(
+      (await command('run', 'start', '--goal', 'One peer per Claimable Task', '--concurrency', '5'))
+        .stdout
+    );
+    await command('run', 'join');
+    await second('run', 'join');
+    await command('task', 'create', '--title', 'Only one owner');
+    const before = await runStatus();
+    const spawnedBefore = () => {
+      const file = path.join(project, '.pi/messenger/agents', `${started.id}.jsonl`);
+      if (!fs.existsSync(file)) return 0;
+      return fs
+        .readFileSync(file, 'utf8')
+        .trim()
+        .split('\n')
+        .filter((line) => line.includes('"type":"spawned"')).length;
+    };
+    expect(spawnedBefore()).toBe(0);
+    // Queue both admissions behind the real run lock so each service snapshots
+    // the same Claimable Task before either peer exists.
+    while (true) {
+      try {
+        fs.mkdirSync(runLock);
+        break;
+      } catch {
+        await sleep(5);
+      }
+    }
+    lockHeld = true;
+    fs.writeFileSync(path.join(runLock, 'pid'), String(process.pid));
+    const livePeers = () => {
+      const file = path.join(project, '.pi/messenger/agents', `${started.id}.jsonl`);
+      if (!fs.existsSync(file)) return 0;
+      try {
+        return spawnedPids(started.id).filter((peer) => peer.pid && pidAlive(peer.pid)).length;
+      } catch {
+        return 0;
+      }
+    };
+    let maxLive = 0;
+    pending = Promise.allSettled([
+      command('spawn', '--task-id', 'task-1', '--model', 'fixture/fixture', 'Hold first worker'),
+      second('spawn', '--task-id', 'task-1', '--model', 'fixture/fixture', 'Hold second worker'),
+    ]);
+    watch = setInterval(() => {
+      maxLive = Math.max(maxLive, livePeers());
+    }, 20);
+    await sleep(400);
+    releaseLock();
+    const admissions = await pending;
+    pending = undefined;
+    clearInterval(watch);
+    watch = undefined;
+    maxLive = Math.max(maxLive, livePeers());
+    const detail = admissions
+      .map((result) =>
+        result.status === 'fulfilled'
+          ? result.value.stdout
+          : String((result.reason as { stderr?: string })?.stderr ?? result.reason)
+      )
+      .join('\n---\n');
+    expect(
+      admissions.filter((result) => result.status === 'fulfilled'),
+      detail
+    ).toHaveLength(1);
+    const rejected = admissions.find(
+      (result) => result.status === 'rejected'
+    ) as PromiseRejectedResult;
+    const stderr = String((rejected.reason as { stderr?: string })?.stderr ?? rejected.reason);
+    expect(stderr, detail).toContain('claimed by a live owner');
+    expect(stderr, detail).not.toContain('Project run is busy');
+    expect(maxLive, detail).toBe(1);
+    expect(livePeers(), detail).toBe(1);
+    expect(spawnedBefore(), detail).toBe(1);
+    const after = await runStatus();
+    expect(after.consumedSteps).toBe(before.consumedSteps);
+    expect(after.width.live).toBe(1);
+    expect(after.width.live).toBeLessThanOrEqual(after.width.cap);
+    expect(after.width.cap).toBeGreaterThan(1);
+  } finally {
+    if (watch) clearInterval(watch);
+    releaseLock();
+    await pending?.catch(() => undefined);
+    await command('abort').catch(() => {});
+    await second('--stop').catch(() => {});
+    fs.rmSync(hostConfig(), { force: true });
+    provider.closeAllConnections();
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
+  }
+}, 40_000);
+
+it('rejects unbound and already-owned spawns while Width stays at the one Claimable Task', async () => {
+  await command('abort').catch(() => {});
+  const provider = createHttpServer(async (req) => {
+    for await (const _chunk of req) {
+      /* keep the admitted peer alive so Width includes it */
+    }
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  const owner = (...args: string[]) =>
+    exec(process.execPath, [cli, ...args], {
+      cwd: project,
+      env: { ...env, PI_SWARM_PEER_PID: String(process.pid) },
+      timeout: 20_000,
+    });
+  try {
+    setHostWidthCap(5);
+    const started = JSON.parse(
+      (await command('run', 'start', '--goal', 'No idle parallelism', '--concurrency', '5')).stdout
+    );
+    await command('run', 'join');
+    await command('task', 'create', '--title', 'Only claimable work');
+    await command(
+      'spawn',
+      '--task-id',
+      'task-1',
+      '--model',
+      'fixture/fixture',
+      'Hold the only task'
+    );
+    const before = await runStatus();
+    expect(before.width).toMatchObject({ live: 1, cap: 5 });
+    expect(spawnedEventCount(started.id)).toBe(1);
+    const reject = async (...args: string[]) => {
+      const failed = await command(...args).then(
+        (ok) => {
+          throw new Error(`spawn should have been rejected: ${ok.stdout}`);
+        },
+        (error: { code?: number; stderr?: string }) => error
+      );
+      expect(failed.code).toBe(1);
+      return String(failed.stderr);
+    };
+    expect(
+      await reject('spawn', '--task-id', 'task-1', '--model', 'fixture/fixture', 'Second owner')
+    ).toContain('claimed by a live owner');
+    expect(await reject('spawn', '--model', 'fixture/fixture', 'Unbound worker')).toContain(
+      'not bound to a Claimable Task'
+    );
+    expect(
+      await reject('spawn', '--force', '--model', 'fixture/fixture', 'Forced unbound worker')
+    ).toContain('not bound to a Claimable Task');
+    await command(
+      'task',
+      'create',
+      '--title',
+      'Waiting on the first task',
+      '--depends-on',
+      'task-1'
+    );
+    expect(
+      await reject('spawn', '--task-id', 'task-2', '--model', 'fixture/fixture', 'Blocked child')
+    ).toContain('unmet dependencies');
+    await command('task', 'create', '--title', 'Lease held by the delegator');
+    await owner('run', 'join').catch(() => {});
+    await owner('task', 'claim', 'task-3');
+    expect((await command('task', 'show', 'task-3')).stdout).toContain('Status: in_progress');
+    expect(
+      await reject('spawn', '--task-id', 'task-3', '--model', 'fixture/fixture', 'Steal the lease')
+    ).toContain('claimed by a live owner');
+    const after = await runStatus();
+    expect(after.consumedSteps).toBe(before.consumedSteps);
+    expect(after.width.live).toBe(1);
+    expect(after.width.cap).toBe(before.width.cap);
+    expect(spawnedEventCount(started.id)).toBe(1);
+    expect(spawnedPids(started.id).filter((peer) => pidAlive(peer.pid))).toHaveLength(1);
+  } finally {
+    await command('abort').catch(() => {});
+    fs.rmSync(hostConfig(), { force: true });
+    provider.closeAllConnections();
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
+  }
+}, 40_000);
+
+it('admits a peer only after dependencies are done or verified', async () => {
+  await command('abort').catch(() => {});
+  const provider = createHttpServer(async (req) => {
+    for await (const _chunk of req) {
+      /* keep admitted peers alive */
+    }
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  try {
+    const started = JSON.parse(
+      (await command('run', 'start', '--goal', 'Dependency admission', '--concurrency', '5')).stdout
+    );
+    await command('run', 'join');
+    await command('task', 'create', '--title', 'Closed without a gate');
+    await command('task', 'claim', 'task-1');
+    await command('task', 'done', 'task-1', 'closed without a gate');
+    expect((await command('task', 'show', 'task-1')).stdout).toContain('Status: done');
+    await command('task', 'create', '--title', 'Verified gate');
+    await command('task', 'claim', 'task-2');
+    await command('task', 'done', 'task-2', 'verified', '--verify', 'node -e "process.exit(0)"');
+    expect((await command('task', 'show', 'task-2')).stdout).toContain('Status: verified');
+    await command('task', 'create', '--title', 'After done', '--depends-on', 'task-1');
+    await command('task', 'create', '--title', 'After verified', '--depends-on', 'task-2');
+    await command(
+      'spawn',
+      '--task-id',
+      'task-3',
+      '--model',
+      'fixture/fixture',
+      'Follow the done dependency'
+    );
+    await command(
+      'spawn',
+      '--task-id',
+      'task-4',
+      '--model',
+      'fixture/fixture',
+      'Follow the verified dependency'
+    );
+    await expect(
+      command('spawn', '--task-id', 'task-1', '--model', 'fixture/fixture', 'Done is not claimable')
+    ).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining('not a Claimable Task (status done)'),
+    });
+    await expect(
+      command(
+        'spawn',
+        '--task-id',
+        'task-2',
+        '--model',
+        'fixture/fixture',
+        'Verified is not claimable'
+      )
+    ).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining('not a Claimable Task (status verified)'),
+    });
+    const live = spawnedPids(started.id).filter((peer) => pidAlive(peer.pid));
+    expect(live.map((peer) => peer.taskId).sort()).toEqual(['task-3', 'task-4']);
+    expect((await runStatus()).width.live).toBe(2);
+  } finally {
+    await command('abort').catch(() => {});
+    provider.closeAllConnections();
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
+  }
+}, 40_000);
+
+it('states why admission stops for acceptance, abort, and archival', async () => {
+  await command('abort').catch(() => {});
+  const marker = path.join(project, '.pi', 'admission-acceptance');
+  fs.rmSync(marker, { force: true });
+  const slow = `node -e "require('fs').writeFileSync('.pi/admission-acceptance','yes');setTimeout(()=>{},20000)"`;
+  const started = JSON.parse(
+    (await command('run', 'start', '--goal', 'Pause for acceptance', '--verify', slow)).stdout
+  );
+  await command('run', 'join');
+  await command('task', 'create', '--title', 'Verified prerequisite');
+  await command('task', 'claim', 'task-1');
+  await command('task', 'done', 'task-1', 'verified', '--verify', 'node -e "process.exit(0)"');
+  await vi.waitFor(() => expect(fs.existsSync(marker)).toBe(true), { timeout: 10_000 });
+  const during = await runStatus();
+  expect(during.status).toBe('active');
+  await expect(command('spawn', '--force', 'during acceptance')).rejects.toMatchObject({
+    code: 1,
+    stderr: expect.stringContaining('Overall Goal Acceptance is running'),
+  });
+  expect(spawnedEventCount(started.id)).toBe(0);
+  expect((await runStatus()).consumedSteps).toBe(during.consumedSteps);
+  await command('abort');
+  await expect(
+    command('spawn', '--task-id', 'task-1', '--force', 'after abort')
+  ).rejects.toMatchObject({
+    code: 1,
+    stderr: expect.stringContaining('Run aborted'),
+  });
+  expect(JSON.parse((await command('run', 'show', started.id)).stdout).status).toBe('aborted');
+  expect(spawnedEventCount(started.id)).toBe(0);
+
+  const archived = JSON.parse(
+    (
+      await command(
+        'run',
+        'start',
+        '--goal',
+        'Archive the run',
+        '--verify',
+        'node -e "process.exit(0)"'
+      )
+    ).stdout
+  );
+  await command('run', 'join');
+  await command('task', 'create', '--title', 'Ready to archive');
+  await command('task', 'claim', 'task-1');
+  await command('task', 'done', 'task-1', 'verified', '--verify', 'node -e "process.exit(0)"');
+  await vi.waitFor(
+    async () =>
+      expect(JSON.parse((await command('run', 'show', archived.id)).stdout).status).toBe(
+        'completed'
+      ),
+    { timeout: 15_000 }
+  );
+  await expect(command('spawn', '--force', 'after archival')).rejects.toMatchObject({
+    code: 1,
+    stderr: expect.stringContaining('Run archived'),
+  });
+  expect(spawnedEventCount(archived.id)).toBe(0);
+  await command('abort').catch(() => {});
+}, 40_000);
+
+it('keeps spawn behavior when no Swarm Run is active', async () => {
+  const fresh = path.join(root, 'no-run-spawn');
+  await initRepo(fresh);
+  const freshCmd = (...args: string[]) => run(process.execPath, [cli, ...args], fresh);
+  for (const args of [
+    ['spawn', 'Work without a run'],
+    ['spawn', '--force', 'Work without a run'],
+  ]) {
+    await expect(freshCmd(...args)).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining('No active Swarm Run'),
+    });
+  }
+  const forced = await freshCmd('spawn', '--force', 'Still no run').then(
+    () => {
+      throw new Error('spawn should fail without a run');
+    },
+    (error: { stderr?: string }) => String(error.stderr)
+  );
+  expect(forced).toContain('No active Swarm Run');
+  expect(forced).not.toContain('ready task');
+  expect(forced).not.toContain('Claimable Task');
+  expect(fs.existsSync(path.join(fresh, '.pi/messenger/agents'))).toBe(false);
+});
+
+it('does not start a successor for a task that is no longer claimable', async () => {
+  await command('abort').catch(() => {});
+  const provider = createHttpServer(async (req) => {
+    for await (const _chunk of req) {
+      /* hold peers until the test kills them */
+    }
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  try {
+    const started = JSON.parse(
+      (await command('run', 'start', '--goal', 'Successor stays claimable', '--concurrency', '4'))
+        .stdout
+    );
+    await command('run', 'join');
+    await command('task', 'create', '--title', 'Prerequisite');
+    await command('task', 'claim', 'task-1');
+    await command('task', 'done', 'task-1', 'verified', '--verify', 'node -e "process.exit(0)"');
+    await command(
+      'task',
+      'create',
+      '--title',
+      'Depends on the prerequisite',
+      '--depends-on',
+      'task-1'
+    );
+    await command('task', 'create', '--title', 'Still claimable');
+    await command(
+      'spawn',
+      '--task-id',
+      'task-2',
+      '--model',
+      'fixture/fixture',
+      'Hold the dependent task'
+    );
+    await command('task', 'reset', 'task-1');
+    expect((await command('task', 'show', 'task-1')).stdout).toContain('Status: todo');
+    const victim = spawnedPids(started.id).find((peer) => peer.taskId === 'task-2')!;
+    expect(pidAlive(victim.pid)).toBe(true);
+    process.kill(victim.pid, 'SIGKILL');
+    await sleep(2000);
+    expect(spawnedPids(started.id).filter((peer) => peer.taskId === 'task-2')).toHaveLength(1);
+    const blocked = (await runStatus()).handoffs['task-2'];
+    expect(blocked?.successor).toBeFalsy();
+    expect(blocked?.failures ?? 0).toBe(0);
+    expect(blocked?.suspended).not.toBe(true);
+    await sleep(1500);
+    expect(spawnedPids(started.id).filter((peer) => peer.taskId === 'task-2')).toHaveLength(1);
+    expect((await runStatus()).handoffs['task-2']?.failures ?? 0).toBe(0);
+
+    await command(
+      'spawn',
+      '--task-id',
+      'task-3',
+      '--model',
+      'fixture/fixture',
+      'Hold the claimable task'
+    );
+    const claimable = spawnedPids(started.id).find((peer) => peer.taskId === 'task-3')!;
+    process.kill(claimable.pid, 'SIGKILL');
+    await vi.waitFor(
+      async () => {
+        const handoff = (await runStatus()).handoffs['task-3'];
+        expect(handoff?.successor).toBeTruthy();
+        expect(handoff?.failures ?? 0).toBe(0);
+        expect(spawnedPids(started.id).filter((peer) => peer.taskId === 'task-3').length).toBe(2);
+      },
+      { timeout: 12_000 }
+    );
+  } finally {
+    await command('abort').catch(() => {});
+    provider.closeAllConnections();
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
+  }
+}, 50_000);
 
 it('derives the Run Width Cap and default budget from the one Host Width Cap entry', async () => {
   await command('abort').catch(() => {});
@@ -1363,7 +1813,10 @@ it('narrows Width to the remaining budget and trips the breaker without changing
       { timeout: 30_000, interval: 100 }
     );
     expect(sawNarrowed).toBe(true);
-    await expect(spawnFor('task-3')).rejects.toMatchObject({ code: 1 });
+    await expect(spawnFor('task-3')).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringMatching(/Step budget exhausted|Run aborted|budget/),
+    });
     expect(spawnedPids(started.id)).toHaveLength(2);
     const stopped = JSON.parse((await command('run', 'show', started.id)).stdout);
     expect(stopped.maxSteps).toBe(12);
@@ -1685,7 +2138,6 @@ it('preserves an unverified candidate and lets an explicit successor restore and
   );
   await command('run', 'join');
   await command('task', 'create', '--title', 'Unfinished source');
-  await command('task', 'claim', 'task-1');
   const beta = path.join(root, 'beta-candidate');
   await initRepo(beta);
   const betaCmd = (...args: string[]) =>
@@ -1709,6 +2161,7 @@ it('preserves an unverified candidate and lets an explicit successor restore and
       'fixture/fixture',
       'leave a candidate'
     );
+    await command('task', 'claim', 'task-1');
     const editorId = (await command('spawn', 'list')).stdout.match(/^- (\w+): Editor /m)?.[1];
     expect(editorId).toBeTruthy();
     const editorSandbox = path.join(project, '.swarm', 'workspaces', `worker-${editorId}`);
@@ -1744,6 +2197,7 @@ it('preserves an unverified candidate and lets an explicit successor restore and
     await expect(betaCmd('candidate', 'show', candidateId)).rejects.toMatchObject(outOfScope);
     await expect(betaCmd('candidate', 'restore', candidateId)).rejects.toMatchObject(outOfScope);
 
+    await command('task', 'unclaim', 'task-1');
     await command(
       'spawn',
       '--task-id',
@@ -1754,7 +2208,6 @@ it('preserves an unverified candidate and lets an explicit successor restore and
       'fixture/fixture',
       'selective restore'
     );
-    await command('task', 'unclaim', 'task-1');
     const successorId = (await command('spawn', 'list')).stdout.match(/^- (\w+): Successor /m)?.[1];
     expect(successorId, (await command('spawn', 'list')).stdout).toBeTruthy();
     const sandbox = path.join(project, '.swarm', 'workspaces', `worker-${successorId}`);
@@ -1850,7 +2303,6 @@ it('keeps the sandbox when preservation fails, still hands off another task, and
     await command('run', 'join');
     await command('task', 'create', '--title', 'Broken sandbox');
     await command('task', 'create', '--title', 'Handed off despite the broken sandbox');
-    await command('task', 'claim', 'task-1');
     await command(
       'spawn',
       '--task-id',
@@ -1863,6 +2315,7 @@ it('keeps the sandbox when preservation fails, still hands off another task, and
     );
     const brokenId = (await command('spawn', 'list')).stdout.match(/^- (\w+): Broken /m)?.[1];
     expect(brokenId).toBeTruthy();
+    await command('task', 'claim', 'task-1');
     const sandbox = path.join(project, '.swarm', 'workspaces', `worker-${brokenId}`);
     await vi.waitFor(
       async () => expect((await command('ps', 'logs', brokenId!)).stdout).toContain('READY'),
@@ -1961,7 +2414,6 @@ it('keeps the sandbox of a peer adopted across a restart when its candidate cann
     await command('run', 'start', '--goal', 'Reconcile an adopted peer', '--max-steps', '20');
     await command('run', 'join');
     await command('task', 'create', '--title', 'Adopted work');
-    await command('task', 'claim', 'task-1');
     await command(
       'spawn',
       '--task-id',
@@ -1972,6 +2424,7 @@ it('keeps the sandbox of a peer adopted across a restart when its candidate cann
       'fixture/fixture',
       'wait across a restart'
     );
+    await command('task', 'claim', 'task-1');
     const adoptedId = spawnedId((await command('spawn', 'list')).stdout, 'Adopted');
     expect(adoptedId).toBeTruthy();
     const sandbox = path.join(project, '.swarm', 'workspaces', `worker-${adoptedId}`);
@@ -2021,7 +2474,6 @@ it('does not let a saved candidate revive pruned work or reset its verification 
     await command('run', 'start', '--goal', 'Pruned work stays pruned', '--max-steps', '10');
     await command('run', 'join');
     await command('task', 'create', '--title', 'Already disproved');
-    await command('task', 'claim', 'task-1');
     await command(
       'spawn',
       '--task-id',
@@ -2032,6 +2484,7 @@ it('does not let a saved candidate revive pruned work or reset its verification 
       'fixture/fixture',
       'leave a pruned candidate'
     );
+    await command('task', 'claim', 'task-1');
     await vi.waitFor(
       async () => {
         const listed = JSON.parse((await command('candidate', 'list', '--task', 'task-1')).stdout);
@@ -2235,26 +2688,28 @@ it('does not replace a task that a live peer still holds, and never merges a pat
       { timeout: 15_000 }
     );
     const before = (await command('spawn', 'history')).stdout;
-    await command(
-      'spawn',
-      '--task-id',
-      'task-1',
-      '--name',
-      'Quitter',
-      '--model',
-      'fixture/fixture',
-      'exit immediately'
-    );
-    await vi.waitFor(
-      async () => expect((await command('spawn', 'history')).stdout).toContain('Quitter'),
-      { timeout: 15_000 }
-    );
+    await expect(
+      command(
+        'spawn',
+        '--task-id',
+        'task-1',
+        '--name',
+        'Quitter',
+        '--model',
+        'fixture/fixture',
+        'exit immediately'
+      )
+    ).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining('claimed by a live owner'),
+    });
     await new Promise((resolve) => setTimeout(resolve, 1500));
     expect((await command('task', 'show', 'task-1')).stdout).toContain('Claimed by: Holder');
     expect((await command('spawn', 'list')).stdout).toContain('Holder');
     const names = (await command('spawn', 'history')).stdout;
     expect(names).toContain('Holder');
-    expect(historyCount(names)).toBe(historyCount(before) + 1);
+    expect(names).not.toContain('Quitter');
+    expect(historyCount(names)).toBe(historyCount(before));
 
     // A failed intent-to-add must not verify and merge a patch lacking the new file.
     const sandbox = path.join(project, '.swarm', 'workspaces', `worker-${holderId}`);
@@ -2916,7 +3371,6 @@ it('reaps a killed peer tool process before saving the handoff candidate and rem
     await command('run', 'start', '--goal', 'Reap before the candidate', '--max-steps', '20');
     await command('run', 'join');
     await command('task', 'create', '--title', 'Unfinished edit');
-    await command('task', 'claim', 'task-1');
     await command(
       'spawn',
       '--task-id',
@@ -2927,6 +3381,7 @@ it('reaps a killed peer tool process before saving the handoff candidate and rem
       'fixture/fixture',
       'Leave a candidate while a tool waits'
     );
+    await command('task', 'claim', 'task-1');
     const id = spawnedId((await command('spawn', 'list')).stdout, 'Editor');
     expect(id).toBeTruthy();
     const sandbox = path.join(project, '.swarm', 'workspaces', `worker-${id}`);

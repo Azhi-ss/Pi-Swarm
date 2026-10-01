@@ -1,4 +1,4 @@
-import { withRunLock } from '../swarm/run-store.js';
+import { readMostRecentRun, withRunLock } from '../swarm/run-store.js';
 import { recoverRun, recordTakeover } from '../swarm/recovery.js';
 import { enqueueCritical } from '../swarm/notifications.js';
 /**
@@ -517,8 +517,18 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
       const requestedRun = header(req, 'x-run-id');
       if (requestedRun && requestedRun !== runId)
         throw new Error('Stale run context: the selected run is no longer active.');
-      if (!runId && (action === 'task.create' || action === 'spawn'))
+      if (!runId && (action === 'task.create' || action === 'spawn')) {
+        if (action === 'spawn') {
+          const recent = readMostRecentRun(projectCwd);
+          if (recent?.status === 'aborted')
+            throw new Error(
+              `Run aborted; peer admission is stopped.${recent.stopReason ? ` ${recent.stopReason}` : ''}`
+            );
+          if (recent?.status === 'completed')
+            throw new Error('Run archived; peer admission is stopped.');
+        }
         throw new Error('No active Swarm Run; use run start --goal before creating work.');
+      }
       const storage = header(req, 'x-storage-root');
       if (storage) selectStorage(projectCwd, storage);
       // Re-resolve with project-specific dirs and config
