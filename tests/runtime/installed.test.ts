@@ -1966,8 +1966,23 @@ it('admits exactly one successor per handoff across two services and a restart, 
     });
     expect((await command('task', 'show', 'task-1')).stdout).toContain('Verification attempts: 1');
 
-    // Both services observe this one exit on every recovery tick.
-    process.kill(await peerPid(command, originalId), 'SIGKILL');
+    // Both services observe this one exit. Holding the real run lock across
+    // two recovery ticks queues both admissions behind it, so whichever
+    // enters second does so with a snapshot taken before the first spawned.
+    const originalPid = await peerPid(command, originalId);
+    const runLock = path.join(project, '.pi/messenger/run.lock');
+    while (true) {
+      try {
+        fs.mkdirSync(runLock);
+        break;
+      } catch {
+        await sleep(5);
+      }
+    }
+    fs.writeFileSync(path.join(runLock, 'pid'), String(process.pid));
+    process.kill(originalPid, 'SIGKILL');
+    await sleep(1200);
+    fs.rmSync(runLock, { recursive: true, force: true });
     let successorId = '';
     await vi.waitFor(
       async () => {
