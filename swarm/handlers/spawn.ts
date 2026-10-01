@@ -16,6 +16,7 @@ import {
 import type { SpawnRequest } from '../types.js';
 import { formatRoleLabel } from '../labels.js';
 import { getCircuitBreaker } from '../circuit-breaker/index.js';
+import { withRunLock } from '../run-store.js';
 import { computeWidth, widthFullMessage } from '../width.js';
 
 export function executeSpawn(
@@ -198,101 +199,104 @@ function spawnCreate(
   // When more subagents run than the provider supports concurrently,
   // excess agents hit rate limits and spin on retries — wasting tokens
   // and making the whole swarm appear stuck.
-  const width = computeWidth(cwd);
-  if (width.live >= width.cap) {
-    return result(`Error: ${widthFullMessage(width)}`, {
-      mode: 'spawn',
-      error: 'concurrency_limit',
-      running: width.live,
-      limit: width.cap,
-      limiter: width.limiter,
-    });
-  }
-
-  // --message-file: read mission text from a file to avoid shell interpolation
-  // of backticks, ${...}, parentheses, etc. in the prompt.
-  let message = params.message?.trim() || params.prompt?.trim();
-  if (params.messageFile) {
-    try {
-      const fileContent = fs.readFileSync(params.messageFile, 'utf-8').trim();
-      if (fileContent) message = fileContent;
-    } catch {
-      return result(`Error: cannot read --message-file: ${params.messageFile}`, {
+  // Recheck under the Project Run lock and start before releasing it.
+  return withRunLock(cwd, () => {
+    const width = computeWidth(cwd);
+    if (width.live >= width.cap) {
+      return result(`Error: ${widthFullMessage(width)}`, {
         mode: 'spawn',
-        error: 'message_file_read_error',
+        error: 'concurrency_limit',
+        running: width.live,
+        limit: width.cap,
+        limiter: width.limiter,
       });
     }
-  }
 
-  // File-based spawn mode
-  if (params.agentFile) {
+    // --message-file: read mission text from a file to avoid shell interpolation
+    // of backticks, ${...}, parentheses, etc. in the prompt.
+    let message = params.message?.trim() || params.prompt?.trim();
+    if (params.messageFile) {
+      try {
+        const fileContent = fs.readFileSync(params.messageFile, 'utf-8').trim();
+        if (fileContent) message = fileContent;
+      } catch {
+        return result(`Error: cannot read --message-file: ${params.messageFile}`, {
+          mode: 'spawn',
+          error: 'message_file_read_error',
+        });
+      }
+    }
+
+    // File-based spawn mode
+    if (params.agentFile) {
+      const request: SpawnRequest = {
+        agentFile: params.agentFile,
+        model: params.model,
+        objective: params.objective,
+        message,
+        context: params.context,
+        taskId: params.taskId,
+        name: params.name,
+      };
+
+      try {
+        const record = spawnSubagent(cwd, request, sessionId, state.currentChannel);
+        const roleLabel = formatRoleLabel(record.role);
+        logFeedEvent(
+          cwd,
+          state.agentName,
+          'message',
+          undefined,
+          `spawned ${record.name} (${roleLabel})`,
+          state.currentChannel
+        );
+
+        return result(`🚀 Spawned ${record.name} (${record.id}) as ${roleLabel}.`, {
+          mode: 'spawn',
+          agent: record,
+        });
+      } catch (err) {
+        return result(`Error: ${err instanceof Error ? err.message : String(err)}`, {
+          mode: 'spawn',
+          error: 'spawn_failed',
+        });
+      }
+    }
+
+    // Autoregressive spawn mode (traditional)
+    const objective = params.objective?.trim() || message;
+    if (!objective) {
+      return result('Error: spawn requires mission text or --objective.', {
+        mode: 'spawn',
+        error: 'missing_objective',
+      });
+    }
+
+    const role = params.role?.trim() || params.title?.trim() || 'Subagent';
     const request: SpawnRequest = {
-      agentFile: params.agentFile,
+      role,
+      persona: params.persona,
+      objective,
       model: params.model,
-      objective: params.objective,
-      message,
       context: params.context,
       taskId: params.taskId,
       name: params.name,
     };
 
-    try {
-      const record = spawnSubagent(cwd, request, sessionId, state.currentChannel);
-      const roleLabel = formatRoleLabel(record.role);
-      logFeedEvent(
-        cwd,
-        state.agentName,
-        'message',
-        undefined,
-        `spawned ${record.name} (${roleLabel})`,
-        state.currentChannel
-      );
+    const record = spawnSubagent(cwd, request, sessionId, state.currentChannel);
+    const roleLabel = formatRoleLabel(record.role);
+    logFeedEvent(
+      cwd,
+      state.agentName,
+      'message',
+      undefined,
+      `spawned ${record.name} (${roleLabel})`,
+      state.currentChannel
+    );
 
-      return result(`🚀 Spawned ${record.name} (${record.id}) as ${roleLabel}.`, {
-        mode: 'spawn',
-        agent: record,
-      });
-    } catch (err) {
-      return result(`Error: ${err instanceof Error ? err.message : String(err)}`, {
-        mode: 'spawn',
-        error: 'spawn_failed',
-      });
-    }
-  }
-
-  // Autoregressive spawn mode (traditional)
-  const objective = params.objective?.trim() || message;
-  if (!objective) {
-    return result('Error: spawn requires mission text or --objective.', {
+    return result(`🚀 Spawned ${record.name} (${record.id}) as ${roleLabel}.`, {
       mode: 'spawn',
-      error: 'missing_objective',
+      agent: record,
     });
-  }
-
-  const role = params.role?.trim() || params.title?.trim() || 'Subagent';
-  const request: SpawnRequest = {
-    role,
-    persona: params.persona,
-    objective,
-    model: params.model,
-    context: params.context,
-    taskId: params.taskId,
-    name: params.name,
-  };
-
-  const record = spawnSubagent(cwd, request, sessionId, state.currentChannel);
-  const roleLabel = formatRoleLabel(record.role);
-  logFeedEvent(
-    cwd,
-    state.agentName,
-    'message',
-    undefined,
-    `spawned ${record.name} (${roleLabel})`,
-    state.currentChannel
-  );
-
-  return result(`🚀 Spawned ${record.name} (${record.id}) as ${roleLabel}.`, {
-    mode: 'spawn',
-    agent: record,
   });
 }

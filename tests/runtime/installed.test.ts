@@ -943,6 +943,102 @@ const pidAlive = (pid: number) => {
 };
 const defaultBudget = (runWidthCap: number) => Math.max(50, Math.ceil((50 * runWidthCap) / 3));
 
+it('admits exactly one spawn when two services race under the held run lock', async () => {
+  await command('abort').catch(() => {});
+  // Hold model requests so an admitted peer stays alive for the width count.
+  const provider = createHttpServer(async (req) => {
+    for await (const _chunk of req) {
+      /* keep the socket open */
+    }
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  const second = await secondService();
+  const runLock = path.join(project, '.pi/messenger/run.lock');
+  let lockHeld = false;
+  let watch: ReturnType<typeof setInterval> | undefined;
+  const releaseLock = () => {
+    if (!lockHeld) return;
+    lockHeld = false;
+    fs.rmSync(runLock, { recursive: true, force: true });
+  };
+  let pending: Promise<PromiseSettledResult<{ stdout: string }>[]> | undefined;
+  try {
+    await command('--start');
+    await second('--start');
+    const started = JSON.parse(
+      (await command('run', 'start', '--goal', 'Concurrent width', '--concurrency', '1')).stdout
+    );
+    await command('run', 'join');
+    await second('run', 'join');
+    // Queue both admissions behind the real run lock. A width check outside
+    // that lock passes in both services before either peer exists.
+    while (true) {
+      try {
+        fs.mkdirSync(runLock);
+        break;
+      } catch {
+        await sleep(5);
+      }
+    }
+    lockHeld = true;
+    fs.writeFileSync(path.join(runLock, 'pid'), String(process.pid));
+    const livePeers = () => {
+      const file = path.join(project, '.pi/messenger/agents', `${started.id}.jsonl`);
+      if (!fs.existsSync(file)) return 0;
+      try {
+        return spawnedPids(started.id).filter((peer) => peer.pid && pidAlive(peer.pid)).length;
+      } catch {
+        return 0;
+      }
+    };
+    let maxLive = 0;
+    pending = Promise.allSettled([
+      command('spawn', '--model', 'fixture/fixture', 'Hold first worker'),
+      second('spawn', '--model', 'fixture/fixture', 'Hold second worker'),
+    ]);
+    watch = setInterval(() => {
+      maxLive = Math.max(maxLive, livePeers());
+    }, 20);
+    await sleep(400);
+    releaseLock();
+    const admissions = await pending;
+    pending = undefined;
+    clearInterval(watch);
+    watch = undefined;
+    maxLive = Math.max(maxLive, livePeers());
+    const detail = admissions
+      .map((result) =>
+        result.status === 'fulfilled'
+          ? result.value.stdout
+          : String((result.reason as { stderr?: string })?.stderr ?? result.reason)
+      )
+      .join('\n---\n');
+    expect(
+      admissions.filter((result) => result.status === 'fulfilled'),
+      detail
+    ).toHaveLength(1);
+    const rejected = admissions.find(
+      (result) => result.status === 'rejected'
+    ) as PromiseRejectedResult;
+    const stderr = String((rejected.reason as { stderr?: string })?.stderr ?? rejected.reason);
+    expect(stderr, detail).toContain('Limited by: run-cap');
+    expect(stderr, detail).not.toContain('Project run is busy');
+    expect(maxLive, detail).toBeLessThanOrEqual(1);
+    expect(livePeers(), detail).toBe(1);
+    expect((await runStatus()).width).toMatchObject({ live: 1, cap: 1, limiter: 'run-cap' });
+  } finally {
+    if (watch) clearInterval(watch);
+    releaseLock();
+    await pending?.catch(() => undefined);
+    await command('abort').catch(() => {});
+    await second('--stop').catch(() => {});
+    provider.closeAllConnections();
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
+  }
+}, 40_000);
+
 it('derives the Run Width Cap and default budget from the one Host Width Cap entry', async () => {
   await command('abort').catch(() => {});
   const hostDefault = Math.min(6, Math.max(1, os.availableParallelism() - 1));
@@ -1120,6 +1216,54 @@ it('converges explicit spawn and Automatic Handoff on the live Host Width Cap', 
     await new Promise<void>((resolve) => provider.close(() => resolve()));
   }
 }, 60_000);
+
+it('starts a successor inside the same Host Width Cap when a live peer exits', async () => {
+  await command('abort').catch(() => {});
+  const provider = createHttpServer(async (req) => {
+    for await (const _chunk of req) {
+      /* keep the admitted peers alive */
+    }
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  useFixture((provider.address() as { port: number }).port);
+  try {
+    await command('--start');
+    setHostWidthCap(2);
+    const started = JSON.parse(
+      (await command('run', 'start', '--goal', 'Same cap handoff', '--concurrency', '5')).stdout
+    );
+    await command('run', 'join');
+    await command('task', 'create', '--title', 'Width task 1');
+    await command('task', 'create', '--title', 'Width task 2');
+    await command('spawn', '--task-id', 'task-1', '--model', 'fixture/fixture', 'Hold task-1');
+    await command('spawn', '--task-id', 'task-2', '--model', 'fixture/fixture', 'Hold task-2');
+    expect((await runStatus()).width).toMatchObject({ live: 2, cap: 2, host: 2 });
+    const victim = spawnedPids(started.id).find((peer) => peer.taskId === 'task-1')!;
+    expect(pidAlive(victim.pid)).toBe(true);
+    process.kill(victim.pid, 'SIGKILL');
+    await vi.waitFor(
+      async () => {
+        const status = await runStatus();
+        expect(status.width).toMatchObject({ live: 2, cap: 2, host: 2 });
+        expect(status.handoffs['task-1']).toMatchObject({ failures: 0 });
+        expect(status.handoffs['task-1'].successor).toBeTruthy();
+        expect(spawnedPids(started.id).filter((peer) => pidAlive(peer.pid))).toHaveLength(2);
+      },
+      { timeout: 12_000 }
+    );
+    const after = await runStatus();
+    expect(after.width.cap).toBe(2);
+    expect(after.handoffs['task-1'].failures).toBe(0);
+    expect(after.handoffs['task-1'].successor).toBeTruthy();
+    expect(spawnedPids(started.id).filter((peer) => pidAlive(peer.pid))).toHaveLength(2);
+  } finally {
+    await command('abort').catch(() => {});
+    fs.rmSync(hostConfig(), { force: true });
+    provider.closeAllConnections();
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
+  }
+}, 40_000);
 
 it('narrows Width to the remaining budget and trips the breaker without changing it', async () => {
   await command('abort').catch(() => {});

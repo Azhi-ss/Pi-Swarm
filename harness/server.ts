@@ -603,7 +603,8 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
         'task.block',
         'task.unblock',
         'task.create',
-        'spawn',
+        // spawn locks in the handler around the width check and start.
+        // withRunLock is not reentrant, so locking here as well deadlocks.
       ].includes(action)
         ? withRunLock(projectCwd, dispatch)
         : dispatch());
