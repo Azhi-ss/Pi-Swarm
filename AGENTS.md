@@ -81,3 +81,13 @@ pi-messenger-swarm challenge <taskId> "反驳理由与反例"
 - ❌ **严禁删除或覆盖宿主 `node_modules`**（沙箱退出仅解绑软链接）；
 - ❌ **严禁在未通过机器真实测试（Exit 0）前口头声明完成**；
 - ❌ **严禁过度设计**（遵循 Karpathy / Ponytail 哲学：最短可用 Diff 胜出，禁止非必要的层层抽象与外部依赖引入）。
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live as GitHub issues on `Azhi-ss/Pi-Swarm`. See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+Single-context: root `CONTEXT.md` and `docs/adr/`. See `docs/agents/domain.md`.
