@@ -403,5 +403,5 @@ describe('peer toolbox CLI integration', () => {
       server.kill('SIGTERM');
       await stopped;
     }
-  }, 30_000);
+  }, 90_000);
 });

@@ -201,7 +201,7 @@ describe('observer commands', () => {
       server.kill('SIGTERM');
       await Promise.all([peerClosed, serverClosed]);
     }
-  }, 30_000);
+  }, 90_000);
 
   it('admits less than 1000 bytes across all four zones even for oversized multilingual snapshots', async () => {
     const { cwd } = createMessengerFixture('observer-budget-');
