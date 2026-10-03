@@ -11,13 +11,13 @@ import {
  * Pi Messenger Extension
  *
  * Enables pi agents to discover and communicate with each other across terminal sessions.
- * Uses file-based coordination with a harness server for action dispatch.
+ * Uses file-based coordination. Harness actions go through executeAction.
  *
  * Architecture:
  * - This extension manages lifecycle hooks (registration, status, overlay, reservations)
- * - A long-lived harness server (pi-messenger-swarm) handles all action dispatch
- * - Models interact via the CLI, not a tool call — no eager invocation risk
- * - The SKILL.md teaches models how to use the CLI
+ * - The long-lived harness server remains the command-line path for the Delegator
+ * - A spawned Peer Node calls twelve deferred harness tools in-process
+ * - The SKILL.md teaches the Delegator how to use the CLI
  */
 
 import * as fs from 'node:fs';
@@ -52,6 +52,7 @@ import { handleReservationEnforcement } from './extension/reservation.js';
 import { createMentionAutocompleteProvider } from './extension/mention-autocomplete.js';
 import { handleHashInput } from './extension/handle-input.js';
 import { splitCliArgs } from './harness/commands.js';
+import { isSpawnedPeerNode, registerPeerHarnessTools } from './extension/peer-tools.js';
 import { handleSessionShutdown } from './extension/shutdown.js';
 import { processManager } from './swarm/process-manager.js';
 import { WatchdogService } from './swarm/watchdog/index.js';
@@ -118,6 +119,15 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     config,
   });
 
+  registerPeerHarnessTools(pi, {
+    state,
+    dirs,
+    config,
+    nameTheme,
+    deliverMessage,
+    updateStatus,
+  });
+
   function syncContextSession(ctx: ExtensionContext): void {
     const selected = getMessengerDirs();
     if (selected.base !== dirs.base) {
@@ -175,10 +185,15 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     const folder = extractFolder(process.cwd());
     const locationPart = state.gitBranch ? `${folder} on ${state.gitBranch}` : folder;
 
+    const identity = `You are agent "${state.agentName}" in ${locationPart}. Your current channel is ${displayChannelLabel(state.currentChannel)}.`;
+    const content = isSpawnedPeerNode()
+      ? identity
+      : `${identity} Named channel ${displayChannelLabel('memory')} exists for durable cross-session notes. When you spawn agents for tasks, delegate the work — do NOT claim those tasks yourself. Only claim tasks you will implement personally.`;
+
     pi.sendMessage(
       {
         customType: 'messenger_context',
-        content: `You are agent "${state.agentName}" in ${locationPart}. Your current channel is ${displayChannelLabel(state.currentChannel)}. Named channel ${displayChannelLabel('memory')} exists for durable cross-session notes. Use pi-messenger-swarm for all coordination. Key: when you spawn agents for tasks, delegate the work — do NOT claim those tasks yourself (spawned agents claim and execute them). Only claim tasks you will implement personally. Read agent output with task show (feed shows only previews). Examples: pi-messenger-swarm join | pi-messenger-swarm swarm | pi-messenger-swarm task create --title "..." | pi-messenger-swarm spawn --task-id task-1 --role Debugger "Fix X" | pi-messenger-swarm task show task-1 | pi-messenger-swarm send AgentName "hello" | pi-messenger-swarm feed --limit 20. See SKILL for full reference.`,
+        content,
         display: false,
       },
       { triggerTurn: false }
@@ -445,7 +460,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     harnessServer.start();
     Object.assign(dirs, getMessengerDirs());
 
-    if (!shouldAutoRegister) {
+    if (!shouldAutoRegister && !isSpawnedPeerNode()) {
       return;
     }
 
@@ -453,9 +468,9 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     if (store.register(state, dirs, ctx, nameTheme)) {
       updateStatus(ctx);
       if (!wasRegistered) {
-        const cwd = ctx.cwd ?? process.cwd();
-        pruneFeed(cwd, config.feedRetention, state.currentChannel);
-        logFeedEvent(cwd, state.agentName, 'join', undefined, undefined, state.currentChannel);
+        // Join evidence belongs to the Project. A spawned Peer Node's cwd is its Sandbox.
+        pruneFeed(project, config.feedRetention, state.currentChannel);
+        logFeedEvent(project, state.agentName, 'join', undefined, undefined, state.currentChannel);
       }
 
       if (config.registrationContext) {
