@@ -6,73 +6,127 @@
 - **Target Competition**: `terminal-bench-science-v0-1-0-noisy-blackbox-optim-8ba810d5`
 - **Platform**: [DP Technology Bohrium Playground](https://play.bohrium.com/)
 
-同一赛题、同一模型，跑两次。第一次没有 pi-swarm。第二次才开 swarm。比的是官方分，不是过程叙述。
+同一赛题、同一模型，跑两次。第一次没有 pi-swarm。第二次才开 swarm。比较值是官方 `score`。
 
 ## 1. 锁死的变量
 
-两次都用这一条：
+两次都用这一条，界面上就是 `(gpugeek) DeepSeek-V4.1-Flash • high`：
 
 ```bash
 pi --model gpugeek/DeepSeek-V4.1-Flash:high
 ```
 
-界面上就是 `(gpugeek) DeepSeek-V4.1-Flash • high`。provider、模型 id、thinking 档都不许换。
+provider、模型 id、thinking 档都不许换。worker 数量和算法假说不锁。
 
-|        | Run 1 Solo                      | Run 2 Swarm                              |
-| ------ | ------------------------------- | ---------------------------------------- |
-| 运行时 | 只开 `pi`，不加载 pi-swarm      | `pi` + pi-swarm                          |
-| 模型   | 上面这一条                      | 委托者与每个 worker 同一条               |
-| 工作区 | `~/arena/noisy-blackbox-optim/` | 同一个赛题目录，但是一份新的 `solver.py` |
-| 轨迹   | `archive/solo/trace.jsonl`      | `archive/swarm/trace.jsonl`              |
+赛题是手写 `outputs/solver.py` 里的 `solver(fun, x0)`。禁止 `scipy.optimize` 以及 `cobyqa`、`cma`、`nevergrad`、`nlopt`、Py-BOBYQA 等现成优化器。官方分对 SciPy `Powell`（`0.5000`）做归一化。`0.8000` 只是题面参考线，不是这张 ticket 的关闭条件。
 
-赛题不变：手写 `/app/solver.py` 的 `solver(fun, x0)`，禁止 `scipy.optimize` 以及 `cobyqa`、`cma`、`nevergrad`、`nlopt`、Py-BOBYQA 等现成优化器。官方评估器对 SciPy `Powell`（基线 `0.5000`）做 AUC 归一化。`0.8000` 只是赛题参考强线，不是本 ticket 的通过开关。
+## 2. 两个目录
 
-## 2. Run 1 — 只有 pi
+现有 `~/arena/noisy-blackbox-optim/` 只当题包源，不在里面跑。它现在不是 Git 仓库。两次各用一份拷贝，避免第一次的解、轨迹和 Git 历史被第二次读到。
 
-先跑这个。pi-swarm 不得出现在这次会话里：
-
-```bash
-cd ~/arena/noisy-blackbox-optim
-# outputs/solver.py 先恢复成空桩（只留 def solver(fun, x0)）
-pi --no-extensions --model gpugeek/DeepSeek-V4.1-Flash:high
-```
-
-`--no-extensions` 是为了这次不加载 pi-swarm。会话里不能出现黑板、`task stake`、`spawn`。
-
-跑完后：
-
-1. `playground submit`，记下 `attempt_id`
-2. `playground status --attempt-id <id>`，记下官方 `score` 和 `rank`
-3. 把 `outputs/solver.py`、`traces/trace.jsonl`、attempt 记录归档到 `archive/solo/`
-4. `playground trace validate --trace archive/solo/trace.jsonl` 通过
-
-## 3. Run 2 — swarm
-
-Run 1 归档之后再开。`outputs/solver.py` 重新回到空桩，禁止读取 `archive/solo/solver.py`。
+|        | Run 1 Solo                     | Run 2 Swarm                                           |
+| ------ | ------------------------------ | ----------------------------------------------------- |
+| 目录   | `~/arena/noisy-blackbox-solo/` | `~/arena/noisy-blackbox-swarm/`                       |
+| tmux   | `noisy-solo`                   | `noisy-swarm`，等 Run 1 提交后再开                    |
+| 运行时 | `pi-goal`，不加载 pi-swarm     | `pi-goal` + 本地 pi-swarm                             |
+| Git    | 不建仓库                       | `git init` 并提交基线。worktree 需要已有提交          |
+| 会话   | `--session-dir .pi-session`    | 另一个 `--session-dir .pi-session`，禁止 `--continue` |
 
 ```bash
-pi --model gpugeek/DeepSeek-V4.1-Flash:high
+rm -rf ~/arena/noisy-blackbox-solo ~/arena/noisy-blackbox-swarm
+cp -a ~/arena/noisy-blackbox-optim ~/arena/noisy-blackbox-solo
+cp -a ~/arena/noisy-blackbox-optim ~/arena/noisy-blackbox-swarm
+rm -f ~/arena/noisy-blackbox-solo/traces/trace.jsonl ~/arena/noisy-blackbox-swarm/traces/trace.jsonl
+git -C ~/arena/noisy-blackbox-swarm init
+git -C ~/arena/noisy-blackbox-swarm add -A
+git -C ~/arena/noisy-blackbox-swarm commit -m "baseline task package"
 ```
 
-pi-swarm 按现有方式链进这次会话。每个 worker 必须显式带上同一模型：
+两份的 `outputs/solver.py` 都保持官方空桩（只把 `x0` 返回）。Run 2 不得读取 `noisy-blackbox-solo/`，也不得读取 `~/.pi/agent/sessions` 里的旧会话。分目录挡不住全局会话，所以会话目录必须指到各自文件夹里。
+
+## 3. 同一个 /goal
+
+`~/.pi/agent/pi-goal.json` 两边共用。缺文件时默认只自动续跑 25 次，这道题会在交卷前停下。开跑前写成：
+
+```json
+{
+  "continuationLimits": {
+    "automaticTurns": null,
+    "noProgressTurns": 3
+  }
+}
+```
+
+`automaticTurns: null` 表示不限自动续跑次数。`noProgressTurns` 仍是 3。两边用同一句目标：
+
+```text
+/goal 在本目录从空桩写出 outputs/solver.py，通过官方评测后只提交一次。禁止读取另一个 arena 目录和 ~/.pi/agent/sessions 里的旧会话。模型保持 gpugeek/DeepSeek-V4.1-Flash:high。
+```
+
+## 4. Run 1 — 只有 pi
+
+```bash
+tmux new-session -d -s noisy-solo -c ~/arena/noisy-blackbox-solo -- \
+  pi --no-extensions -e npm:@narumitw/pi-goal --approve \
+  --session-dir .pi-session \
+  --model gpugeek/DeepSeek-V4.1-Flash:high
+```
+
+`--no-extensions` 会关掉全局扩展。`-e npm:@narumitw/pi-goal` 只把 goal 模式加回来，pi-swarm 不在这次会话里。进去后输入上面的 `/goal`。会话里不能出现黑板、`task stake`、`spawn`。跑完后只正式提交一次：
+
+```bash
+playground submit \
+  --challenge-id terminal-bench-science-v0-1-0-noisy-blackbox-optim-8ba810d5 \
+  --outputs outputs \
+  --trace traces/trace.jsonl \
+  --model gpugeek/DeepSeek-V4.1-Flash \
+  --harness pi
+playground status --attempt-id <id>
+playground trace validate --trace traces/trace.jsonl
+```
+
+把 `attempt_id` 和 `score` 写进该目录的 `attempt.json`。`status` 的返回里没有 `rank`。
+
+## 5. Run 2 — swarm
+
+Run 1 的 `attempt.json` 写好后再开。pi-swarm 没有装进全局包，用本地路径加载：
+
+```bash
+tmux new-session -d -s noisy-swarm -c ~/arena/noisy-blackbox-swarm -- \
+  pi --no-extensions --approve \
+  -e npm:@narumitw/pi-goal \
+  -e /home/dministrator/project/pi-swarm \
+  --session-dir .pi-session \
+  --model gpugeek/DeepSeek-V4.1-Flash:high
+```
+
+先输入与 Run 1 相同的 `/goal`，再执行：
+
+```bash
+pi-messenger-swarm run start --goal "在本目录从空桩写出 outputs/solver.py，通过官方评测后只提交一次。禁止读取另一个 arena 目录和 ~/.pi/agent/sessions 里的旧会话。模型保持 gpugeek/DeepSeek-V4.1-Flash:high。"
+```
+
+每个 worker 必须带上同一模型。省略 `--model` 时，子进程不会继承父会话的模型，`:high` 也会丢：
 
 ```bash
 spawn --model gpugeek/DeepSeek-V4.1-Flash:high ...
 ```
 
-不写 `--model` 时，子进程不会继承父会话的模型。`:high` 必须留在模型字符串里。worker 数量与假说内容不锁；模型锁。
+提交、轮询、校验与 Run 1 相同，结果写进 swarm 目录自己的 `attempt.json`。每边只交最终那一次。
 
-提交、轮询、校验与 Run 1 相同，归档到 `archive/swarm/`。
+## 6. 收敛标准
 
-## 4. 完成定义
+关闭条件只有一条：swarm 的官方 `score` 高于 solo。高于一点就够，不要求拉开差距，也不要求打过 `0.8000`。
 
-两次官方结果都落盘即可关闭。假说是：同模型下，swarm 的官方 `score` 高于 solo。假说被证伪也要把数字写上，不能改模型重跑来圆场。
+`playground status --attempt-id <id>` 的 `score` 是唯一比较值。套题总榜 `GET /api/benchmarks/15/leaderboard` 有 `rank`，那是 70 题的总榜，不作为这道题的收敛标准。
 
-| run   | model                            | attempt_id | score | rank |
-| ----- | -------------------------------- | ---------- | ----- | ---- |
-| solo  | gpugeek/DeepSeek-V4.1-Flash:high |            |       |      |
-| swarm | gpugeek/DeepSeek-V4.1-Flash:high |            |       |      |
+solo 分不低于 swarm 分，这张 ticket 就不关。不许换模型重跑。
 
-## 5. 依赖
+| run   | model                            | attempt_id | score |
+| ----- | -------------------------------- | ---------- | ----- |
+| solo  | gpugeek/DeepSeek-V4.1-Flash:high |            |       |
+| swarm | gpugeek/DeepSeek-V4.1-Flash:high |            |       |
+
+## 7. 依赖
 
 #3（Peer 发现与自省）和 #5（status / explain / abort）已关闭。两次测试都没有未完成的前置 ticket。
