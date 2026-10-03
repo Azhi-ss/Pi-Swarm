@@ -200,6 +200,25 @@ async function peerPid(cmd: (...args: string[]) => Promise<{ stdout: string }>, 
 const spawnedId = (listing: string, name: string) =>
   listing.match(new RegExp(`^- (\\w+): ${name} `, 'm'))?.[1];
 const historyCount = (history: string) => (history.match(/^- /gm) || []).length;
+/** Automatic Handoff can occupy the task before an explicit successor is started. */
+async function spawnWhenFree(...args: string[]) {
+  let last: unknown;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const ids = [...(await command('spawn', 'list')).stdout.matchAll(/^- (\w+): /gm)].map(
+      (match) => match[1]
+    );
+    for (const id of ids) await command('spawn', 'stop', id).catch(() => {});
+    try {
+      return await command('spawn', ...args);
+    } catch (error) {
+      last = error;
+      const stderr = String((error as { stderr?: string }).stderr ?? '');
+      if (!stderr.includes('claimed by a live owner') && !stderr.includes('Project run is busy'))
+        throw error;
+    }
+  }
+  throw last;
+}
 async function coldRestart() {
   const previous = JSON.parse((await command('--status')).stdout).pid;
   process.kill(previous, 'SIGTERM');
@@ -254,8 +273,8 @@ beforeAll(async () => {
       private: true,
       type: 'module',
       dependencies: {
-        '@earendil-works/pi-coding-agent': '0.87.0',
-        '@earendil-works/pi-tui': '0.87.0',
+        '@earendil-works/pi-coding-agent': '1.0.1',
+        '@earendil-works/pi-tui': '1.0.1',
       },
     })
   );
@@ -288,8 +307,8 @@ afterAll(async () => {
 it('loads the production extension and starts its installed service in a separate project', async () => {
   const supplied = JSON.parse(fs.readFileSync(path.join(install, 'package.json'), 'utf8'));
   expect(supplied.dependencies).toMatchObject({
-    '@earendil-works/pi-coding-agent': '0.87.0',
-    '@earendil-works/pi-tui': '0.87.0',
+    '@earendil-works/pi-coding-agent': '1.0.1',
+    '@earendil-works/pi-tui': '1.0.1',
   });
   // Let Pi discover the extension declared by the installed package manifest.
   fs.copyFileSync(
@@ -313,9 +332,9 @@ it('loads the production extension and starts its installed service in a separat
   ]);
   for (const dependency of ['@earendil-works/pi-coding-agent', '@earendil-works/pi-tui']) {
     expect(loaded.peers[dependency]).toMatchObject({
-      version: '0.87.0',
-      range: '0.87.x',
-      hostVersion: '0.87.0',
+      version: '1.0.1',
+      range: '1.0.x',
+      hostVersion: '1.0.1',
       suppliedByInstallation: true,
     });
     expect(
@@ -2205,8 +2224,7 @@ it('preserves an unverified candidate and lets an explicit successor restore and
     await expect(betaCmd('candidate', 'restore', candidateId)).rejects.toMatchObject(outOfScope);
 
     await command('task', 'unclaim', 'task-1');
-    await command(
-      'spawn',
+    await spawnWhenFree(
       '--task-id',
       'task-1',
       '--name',

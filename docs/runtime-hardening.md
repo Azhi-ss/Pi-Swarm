@@ -1,6 +1,6 @@
 # Installed runtime and recovery
 
-Pi-Swarm is a Pi extension with a companion CLI. It requires Node.js 22.19 or later and a compatible Pi Host. The tested host and TUI versions are `@earendil-works/pi-coding-agent@0.87.0` and `@earendil-works/pi-tui@0.87.0`; the peer dependency contract is `0.87.x`.
+Pi-Swarm is a Pi extension with a companion CLI. It requires Node.js 22.19 or later and a compatible Pi Host. The tested host and TUI versions are `@earendil-works/pi-coding-agent@1.0.1` and `@earendil-works/pi-tui@1.0.1`; the peer dependency contract is `1.0.x`.
 
 A reproducible installation from a release tarball, without a source checkout or development dependencies (replace the tarball and target-project paths):
 
@@ -9,7 +9,7 @@ export PI_SWARM_INSTALL="$HOME/.local/share/pi-swarm"
 mkdir -p "$PI_SWARM_INSTALL"
 # Supply a compatible Host first, then install the release alongside it.
 npm install --prefix "$PI_SWARM_INSTALL" --omit=dev --ignore-scripts=false --save-exact \
-  @earendil-works/pi-coding-agent@0.87.0 @earendil-works/pi-tui@0.87.0
+  @earendil-works/pi-coding-agent@1.0.1 @earendil-works/pi-tui@1.0.1
 npm install --prefix "$PI_SWARM_INSTALL" --omit=dev --ignore-scripts=false \
   /absolute/path/pi-messenger-swarm-0.26.3.tgz
 export PATH="$PI_SWARM_INSTALL/node_modules/.bin:$PATH"
@@ -26,7 +26,7 @@ pi-messenger-swarm --stop
 
 Put this installation's `node_modules/.bin` on PATH when starting the companion CLI/service so spawned peers use the same Pi Host. A global `pi` executable by itself does not satisfy Node runtime imports. The package declares the Pi libraries as peers, so npm resolves them in the installation tree. Development remains `pnpm install`, `pnpm run build`.
 
-For maintainers, produce that tarball with `pnpm run build` followed by `npm pack`; `npm pack` alone does not compile the release. The supported peer range is `0.87.x`, with the smoke scenario pinned to Host/TUI `0.87.0`. Pi-Swarm does not bootstrap a standalone Pi environment. Normal installation scripts remain enabled; users do not need TypeScript, Vitest, or Git-hook tooling in the runtime installation.
+For maintainers, produce that tarball with `pnpm run build` followed by `npm pack`; `npm pack` alone does not compile the release. The supported peer range is `1.0.x`, with the smoke scenario pinned to Host/TUI `1.0.1`. Pi-Swarm does not bootstrap a standalone Pi environment. Normal installation scripts remain enabled; users do not need TypeScript, Vitest, or Git-hook tooling in the runtime installation.
 
 ## Project and run selection
 

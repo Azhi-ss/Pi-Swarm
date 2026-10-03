@@ -84,8 +84,9 @@ function atomicWrite(file: string, value: unknown) {
 export function withRunLock<T>(cwd: string, operation: () => T): T {
   fs.mkdirSync(root(cwd), { recursive: true });
   const lock = path.join(root(cwd), 'run.lock');
-  // A peer start already inside this lock can take longer than a few seconds when the machine is busy.
-  const deadline = Date.now() + 15_000;
+  // A peer start holds this lock across worktree creation. 15s is too short
+  // when the machine is busy: the next command fails with "Project run is busy".
+  const deadline = Date.now() + 60_000;
   while (true) {
     try {
       fs.mkdirSync(lock);
