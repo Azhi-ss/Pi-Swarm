@@ -1,4 +1,4 @@
-# Spec 0002: Live Swarm E2E Benchmark — Bohrium Playground Noisy Blackbox Optimization
+# Spec 0002: Solo pi vs Swarm — Bohrium noisy-blackbox
 
 - **Status**: Accepted
 - **Driver**: Pi-Swarm Engineering
@@ -6,58 +6,73 @@
 - **Target Competition**: `terminal-bench-science-v0-1-0-noisy-blackbox-optim-8ba810d5`
 - **Platform**: [DP Technology Bohrium Playground](https://play.bohrium.com/)
 
----
+同一赛题、同一模型，跑两次。第一次没有 pi-swarm。第二次才开 swarm。比的是官方分，不是过程叙述。
 
-## 1. 目标与背景 (Context)
+## 1. 锁死的变量
 
-前期针对单文件、10 行代码小 Bug（如 `trpc-7604` 与 `openai-agents-js-375`）的实测证明：单 Agent 凭借局部上下文在 1 分钟内即可解决，无法检验多智能体协同价值。
+两次都用这一条：
 
-本规格将 Pi-Swarm 终极 E2E 验收升级为**高维、高熵、具备真实机器裁判与全球排行榜的科学计算赛题**：
+```bash
+pi --model gpugeek/DeepSeek-V4.1-Flash:high
+```
 
-- **赛题名称**：`Terminal-Bench Science v0.1.0: noisy-blackbox-optimization`
-- **目标产物**：`/app/solver.py`（算法核心接口 `def solver(fun, x0) -> x_best`）
-- **核心挑战**：在未知确定性高维噪声（$\widetilde f(x) = f(x) + \epsilon \eta(x) \max\{1, |f(x)|\}$）及极紧评估预算（$100 \times n$）下，纯手写自研优化算法击败经典 SciPy `Powell` 算法。
-- **硬性约束**：严禁调用任何第三方优化库（`scipy.optimize`、`cma`、`nevergrad` 等），必须纯手写算法。
+界面上就是 `(gpugeek) DeepSeek-V4.1-Flash • high`。provider、模型 id、thinking 档都不许换。
 
----
+|        | Run 1 Solo                      | Run 2 Swarm                              |
+| ------ | ------------------------------- | ---------------------------------------- |
+| 运行时 | 只开 `pi`，不加载 pi-swarm      | `pi` + pi-swarm                          |
+| 模型   | 上面这一条                      | 委托者与每个 worker 同一条               |
+| 工作区 | `~/arena/noisy-blackbox-optim/` | 同一个赛题目录，但是一份新的 `solver.py` |
+| 轨迹   | `archive/solo/trace.jsonl`      | `archive/swarm/trace.jsonl`              |
 
-## 2. 独立工作区与官方交互 (Workspace & Interface)
+赛题不变：手写 `/app/solver.py` 的 `solver(fun, x0)`，禁止 `scipy.optimize` 以及 `cobyqa`、`cma`、`nevergrad`、`nlopt`、Py-BOBYQA 等现成优化器。官方评估器对 SciPy `Powell`（基线 `0.5000`）做 AUC 归一化。`0.8000` 只是赛题参考强线，不是本 ticket 的通过开关。
 
-- **工作区路径**：`~/arena/noisy-blackbox-optim/`（与 `pi-swarm` 代码库完全解耦）
-- **官方输入**：`task.md`
-- **官方产物**：`outputs/solver.py`
-- **官方轨迹**：`traces/trace.jsonl`
+## 2. Run 1 — 只有 pi
 
----
+先跑这个。pi-swarm 不得出现在这次会话里：
 
-## 3. 官方评分与排行榜排名验收标准 (Official Scoring & Ranking)
+```bash
+cd ~/arena/noisy-blackbox-optim
+# outputs/solver.py 先恢复成空桩（只留 def solver(fun, x0)）
+pi --no-extensions --model gpugeek/DeepSeek-V4.1-Flash:high
+```
 
-**本验收测试唯一认可的真值为 Bohrium 官方平台评测结果与官方排行榜排名。**
+`--no-extensions` 是为了这次不加载 pi-swarm。会话里不能出现黑板、`task stake`、`spawn`。
 
-1. **官方评分标准**：
-   - 官方评估器在 10 个精度目标（$10^{-1} \dots 10^{-10}$）上对实际历史曲线计算 AUC 积分，以 SciPy `Powell` 作为归一化基线（基线得分 `0.5000`）；
-   - **及格硬性门槛**：官方云端最终得分必须严格 `> 0.8000`。
-2. **官方排行榜与排名验收**：
-   - 通过 `playground submit` 提交生成官方 `attempt_id`；
-   - 通过 `playground status --attempt-id <attempt_id>` 轮询官方云端状态、官方分数与**官方排行榜排名 (`rank`)**；
-   - **最终验收必须核验官方排名，确认蜂群算法在官方榜单上取得有效竞争名次**。
-3. **ARM 轨迹规范**：
-   - 必须通过 `playground trace validate --trace traces/trace.jsonl` 100% 格式检验。
+跑完后：
 
----
+1. `playground submit`，记下 `attempt_id`
+2. `playground status --attempt-id <id>`，记下官方 `score` 和 `rank`
+3. 把 `outputs/solver.py`、`traces/trace.jsonl`、attempt 记录归档到 `archive/solo/`
+4. `playground trace validate --trace archive/solo/trace.jsonl` 通过
 
-## 4. 蜂群协同攻坚架构 (Swarm Execution)
+## 3. Run 2 — swarm
 
-- **Worker 1 & 2**：自适应差分进化（Adaptive Differential Evolution）假说
-- **Worker 3 & 4**：带噪声平滑的信赖域二次逼近（Trust-Region）假说
-- **Worker 5 & 6**：坐标轮换与自适应收缩模式搜索（Pattern Search）假说
-- **Worker 7 & 8**：专职构造破坏性反例与回归测试门禁
-- **收敛合入**：高分算法通过受控直接原子合并协议（Direct Atomic Merge）合入宿主主干（Zone 3 Verified Artifacts）。
+Run 1 归档之后再开。`outputs/solver.py` 重新回到空桩，禁止读取 `archive/solo/solver.py`。
 
----
+```bash
+pi --model gpugeek/DeepSeek-V4.1-Flash:high
+```
 
-## 5. 验收依赖前置 (Dependencies)
+pi-swarm 按现有方式链进这次会话。每个 worker 必须显式带上同一模型：
 
-- [x] 赛题工作区环境与官方 CLI 预检跑通
-- [ ] #3: Peer 发现与通信信令
-- [ ] #5: 观察者全局管控与解释
+```bash
+spawn --model gpugeek/DeepSeek-V4.1-Flash:high ...
+```
+
+不写 `--model` 时，子进程不会继承父会话的模型。`:high` 必须留在模型字符串里。worker 数量与假说内容不锁；模型锁。
+
+提交、轮询、校验与 Run 1 相同，归档到 `archive/swarm/`。
+
+## 4. 完成定义
+
+两次官方结果都落盘即可关闭。假说是：同模型下，swarm 的官方 `score` 高于 solo。假说被证伪也要把数字写上，不能改模型重跑来圆场。
+
+| run   | model                            | attempt_id | score | rank |
+| ----- | -------------------------------- | ---------- | ----- | ---- |
+| solo  | gpugeek/DeepSeek-V4.1-Flash:high |            |       |      |
+| swarm | gpugeek/DeepSeek-V4.1-Flash:high |            |       |      |
+
+## 5. 依赖
+
+#3（Peer 发现与自省）和 #5（status / explain / abort）已关闭。两次测试都没有未完成的前置 ticket。
