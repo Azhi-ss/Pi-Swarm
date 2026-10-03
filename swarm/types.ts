@@ -144,6 +144,10 @@ export interface SpawnedAgent {
   systemPrompt?: string;
   status: 'running' | 'completed' | 'failed' | 'stopped';
   startedAt: string;
+  /** Last tool start or finish. Idle recovery uses this, not process age. */
+  lastActiveAt?: string;
+  /** A tool call is in flight, so a long evaluation is not idle. */
+  toolBusy?: boolean;
   endedAt?: string;
   exitCode?: number;
   error?: string;

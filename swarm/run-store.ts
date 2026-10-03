@@ -154,9 +154,7 @@ export function startRun(
     if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 50)
       throw new Error('--concurrency must be an integer from 1 to 50.');
     const maxSteps =
-      input.maxSteps === undefined
-        ? Math.max(50, Math.ceil((50 * concurrency) / 3))
-        : input.maxSteps;
+      input.maxSteps === undefined ? Math.max(2000, concurrency * 500) : input.maxSteps;
     if (!Number.isSafeInteger(maxSteps) || maxSteps < 1)
       throw new Error('Budget must be a positive integer.');
     const run: SwarmRun = {

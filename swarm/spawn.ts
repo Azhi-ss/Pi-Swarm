@@ -1,6 +1,7 @@
 import { preserveCandidate } from './candidates.js';
 import { claimableRejection, computeWidth, widthFullMessage } from './width.js';
 import { readRun } from './run-store.js';
+import { renewTaskLease } from './task-store/commands.js';
 import { messengerDirs, activeRunId, peerBelongsToProject } from '../project.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -426,6 +427,20 @@ function attachHandlers(
           sessionId,
         });
       }
+      if (event.type === 'tool_execution_start' || event.type === 'tool_execution_end') {
+        const now = new Date().toISOString();
+        appendEvent(state.cwd, sessionId, {
+          id: state.id,
+          type: 'progress',
+          timestamp: now,
+          agent: {
+            lastActiveAt: now,
+            toolBusy: event.type === 'tool_execution_start',
+          },
+        });
+        if (event.type === 'tool_execution_start' && state.request.taskId)
+          renewTaskLease(state.cwd, sessionId, state.request.taskId, state.name);
+      }
       updateProgress(state.progress, event, state.startMs);
       updateLiveWorker(state.cwd, state.request.taskId || spawnLiveKey(state.id), {
         taskId: state.request.taskId || spawnLiveKey(state.id),
@@ -504,6 +519,7 @@ function attachHandlers(
       eventType = 'failed';
     }
 
+    const noted = runtime.record.error;
     runtime.record = {
       ...runtime.record,
       status,
@@ -512,9 +528,8 @@ function attachHandlers(
       error:
         [
           preservationError,
-          status === 'failed'
-            ? state.stderr.trim() || runtime.record.error || 'subagent failed'
-            : undefined,
+          status === 'stopped' ? noted : undefined,
+          status === 'failed' ? state.stderr.trim() || noted || 'subagent failed' : undefined,
         ]
           .filter(Boolean)
           .join('\n') || undefined,
@@ -687,7 +702,8 @@ export function spawnSubagent(
       testPort: worktree.testPort,
       startedAt,
       status: 'running',
-      timeoutMs: 600_000,
+      // No wall-clock kill. A live tool is progress; idle peers are reaped in recovery.
+      timeoutMs: Number.POSITIVE_INFINITY,
       deferTimeoutCleanup: !!run,
       runId: sessionId,
     },
@@ -803,10 +819,11 @@ function killPidGroup(pid: number, signal: NodeJS.Signals = 'SIGTERM'): void {
   }
 }
 
-export function stopSpawn(cwd: string, id: string, recoverable = false): boolean {
+export function stopSpawn(cwd: string, id: string, recoverable = false, reason?: string): boolean {
   const runtime = runtimes.get(id);
   if (!runtime) return false;
   if (runtime.record.cwd !== cwd) return false;
+  if (reason) runtime.record.error = reason;
   runtime.record.stopRequested = !recoverable;
   appendEvent(cwd, runtime.record.sessionId || '', {
     id,

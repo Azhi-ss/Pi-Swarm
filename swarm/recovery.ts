@@ -26,6 +26,11 @@ import { claimableRejection, computeWidth, isDeferredAdmission } from './width.j
 
 /** A failed check reads external evidence the task log does not contain. */
 const FAILED_ACCEPTANCE_RETRY_MS = 2_000;
+/** Successor must claim after boot and one thinking turn, not within 30s of spawn. */
+const CLAIM_GRACE_MS = 3 * 60 * 1000;
+/** No tool call and no in-flight tool. A running evaluation is progress. */
+const IDLE_MS = 10 * 60 * 1000;
+const IDLE_REASON = 'Idle for 10 minutes with no tool call or task progress.';
 
 /** Width, budget, and stopped-run refusals end the fill. A non-claimable task does not. */
 function stopsFill(message: string): boolean {
@@ -216,14 +221,20 @@ export function recoverRun(cwd: string): void {
       if (
         currentHandoff?.successor === latest.id &&
         !currentHandoff.takenOver &&
-        Date.now() - Date.parse(latest.startedAt) > 30_000
+        Date.now() - Date.parse(latest.startedAt) > CLAIM_GRACE_MS
       ) {
         stopSpawn(cwd, latest.id, true);
         updateRun(cwd, run.id, (r) => {
           r.handoffs[task.id].errors.push(
-            'Takeover timed out: peer did not claim the task within 30 seconds.'
+            'Takeover timed out: peer did not claim the task within 3 minutes.'
           );
         });
+      } else if (
+        currentHandoff?.takenOver &&
+        !latest.toolBusy &&
+        Date.now() - Date.parse(latest.lastActiveAt || latest.startedAt) > IDLE_MS
+      ) {
+        stopSpawn(cwd, latest.id, true, IDLE_REASON);
       }
       continue;
     }
@@ -254,6 +265,10 @@ export function recoverRun(cwd: string): void {
       // Reload under admission lock: another service may already have spawned.
       const existing = listSpawned(cwd, run.id, true).filter((p) => p.taskId === task.id);
       if (existing.some(live)) return;
+      if (h.predecessor !== latest.id && latest.error?.startsWith('Idle for 10 minutes')) {
+        h.failures++;
+        h.errors.push(latest.error);
+      }
       if (h.successor === latest.id && !h.takenOver && h.predecessor !== latest.id) {
         h.failures++;
         h.errors.push(

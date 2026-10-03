@@ -993,7 +993,7 @@ const pidAlive = (pid: number) => {
     return false;
   }
 };
-const defaultBudget = (runWidthCap: number) => Math.max(50, Math.ceil((50 * runWidthCap) / 3));
+const defaultBudget = (runWidthCap: number) => Math.max(2000, runWidthCap * 500);
 
 it('admits exactly one spawn when two services race under the held run lock', async () => {
   await command('abort').catch(() => {});
@@ -1542,9 +1542,9 @@ it('derives the Run Width Cap and default budget from the one Host Width Cap ent
       maxSteps: defaultBudget(hostDefault),
     });
     for (const [width, maxSteps] of [
-      [6, 100],
-      [3, 50],
-      [2, 50],
+      [6, 3000],
+      [3, 2000],
+      [2, 2000],
     ])
       expect(await started('--concurrency', String(width))).toMatchObject({
         concurrency: width,
@@ -3014,7 +3014,7 @@ it('admits exactly one successor per handoff across two services and a restart, 
   }
 }, 70_000);
 
-it('counts a successor that does not claim within 30 seconds as one takeover failure', async () => {
+it('counts a successor that does not claim within 3 minutes as one takeover failure', async () => {
   await command('abort').catch(() => {});
   const provider = createHttpServer(async (req, res) => {
     let raw = '';
@@ -3059,7 +3059,7 @@ it('counts a successor that does not claim within 30 seconds as one takeover fai
         expect(handoff.failures).toBe(1);
         expect(handoff.errors[0]).toContain('Takeover timed out');
       },
-      { timeout: 45_000, interval: 500 }
+      { timeout: 200_000, interval: 500 }
     );
     const handoff = JSON.parse((await command('run', 'status')).stdout).handoffs['task-1'];
     expect(handoff.takenOver).not.toBe(true);
@@ -3072,7 +3072,7 @@ it('counts a successor that does not claim within 30 seconds as one takeover fai
     provider.closeAllConnections();
     await new Promise<void>((resolve) => provider.close(() => resolve()));
   }
-}, 80_000);
+}, 240_000);
 
 it('runs the packaged journey from shared storage to archived acceptance and the next run', async () => {
   await command('abort').catch(() => {});
@@ -4162,7 +4162,7 @@ it('Demand Fill: three startup failures suspend the task and another task still 
   }
 }, 90_000);
 
-it('Demand Fill: a peer that does not claim within 30 seconds is stopped and counted', async () => {
+it('Demand Fill: a peer that does not claim within 3 minutes is stopped and counted', async () => {
   await command('abort').catch(() => {});
   const provider = createHttpServer(async (req, res) => {
     let raw = '';
@@ -4197,7 +4197,7 @@ it('Demand Fill: a peer that does not claim within 30 seconds is stopped and cou
           '--concurrency',
           '2',
           '--max-steps',
-          '40'
+          '400'
         )
       ).stdout
     );
@@ -4229,18 +4229,18 @@ it('Demand Fill: a peer that does not claim within 30 seconds is stopped and cou
         expect(handoff.suspended).not.toBe(true);
         expect(pidAlive(idlePid)).toBe(false);
       },
-      { timeout: 45_000, interval: 500 }
+      { timeout: 200_000, interval: 500 }
     );
     expect((await command('task', 'show', 'task-1')).stdout).toContain('Verification attempts: 0');
     expect((await command('task', 'show', 'task-2')).stdout).toContain('Status: in_progress');
     expect((await command('task', 'show', 'task-2')).stdout).toContain('Verification attempts: 0');
-    expect(JSON.parse((await command('run', 'status')).stdout).maxSteps).toBe(40);
+    expect(JSON.parse((await command('run', 'status')).stdout).maxSteps).toBe(400);
   } finally {
     await command('abort').catch(() => {});
     fs.rmSync(hostConfig(), { force: true });
     await closeProvider(provider);
   }
-}, 80_000);
+}, 240_000);
 
 it('Demand Fill: Project Y fills while Project X is at its cap', async () => {
   await command('abort').catch(() => {});
