@@ -225,9 +225,10 @@ export function recoverRun(cwd: string): void {
       ) {
         stopSpawn(cwd, latest.id, true);
         updateRun(cwd, run.id, (r) => {
-          r.handoffs[task.id].errors.push(
-            'Takeover timed out: peer did not claim the task within 3 minutes.'
-          );
+          const handoff = (r.handoffs[task.id] ||= { failures: 0, errors: [] });
+          if (handoff.errors.some((error) => error.startsWith('Takeover timed out:'))) return;
+          handoff.failures++;
+          handoff.errors.push('Takeover timed out: peer did not claim the task within 3 minutes.');
         });
       } else if (
         currentHandoff?.takenOver &&

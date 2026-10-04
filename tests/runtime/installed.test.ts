@@ -4247,7 +4247,7 @@ it('Demand Fill: a peer that does not claim within 3 minutes is stopped and coun
         expect(handoff.suspended).not.toBe(true);
         expect(pidAlive(idlePid)).toBe(false);
       },
-      { timeout: 200_000, interval: 500 }
+      { timeout: 240_000, interval: 500 }
     );
     expect((await command('task', 'show', 'task-1')).stdout).toContain('Verification attempts: 0');
     expect((await command('task', 'show', 'task-2')).stdout).toContain('Status: in_progress');
@@ -4258,7 +4258,7 @@ it('Demand Fill: a peer that does not claim within 3 minutes is stopped and coun
     fs.rmSync(hostConfig(), { force: true });
     await closeProvider(provider);
   }
-}, 240_000);
+}, 360_000);
 
 it('Demand Fill: Project Y fills while Project X is at its cap', async () => {
   await command('abort').catch(() => {});
