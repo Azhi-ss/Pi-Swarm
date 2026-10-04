@@ -100,6 +100,7 @@ describe('swarm spawn skill inheritance', () => {
       }
     }
 
+    expect(args).toContain('--no-skills');
     expect(skillValues).toContain(skillA);
     expect(skillValues).toContain(skillB);
     expect(skillValues).toHaveLength(2);
@@ -131,6 +132,7 @@ describe('swarm spawn skill inheritance', () => {
       }
     }
 
+    expect(args).toContain('--no-skills');
     expect(skillValues).toContain(skillC);
 
     proc.emit('close', 0);
@@ -162,6 +164,7 @@ describe('swarm spawn skill inheritance', () => {
       }
     }
 
+    expect(args).toContain('--no-skills');
     expect(skillValues).toEqual([validSkill]);
 
     proc.emit('close', 0);
@@ -180,6 +183,7 @@ describe('swarm spawn skill inheritance', () => {
     expect(spawnMock).toHaveBeenCalledTimes(1);
     const args = spawnMock.mock.calls[0][1] as string[];
 
+    expect(args).toContain('--no-skills');
     expect(args).not.toContain('--skill');
 
     proc.emit('close', 0);

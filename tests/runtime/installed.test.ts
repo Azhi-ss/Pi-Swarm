@@ -302,7 +302,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (cli) await command('--stop').catch(() => {});
   fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-});
+}, 60_000);
 
 it('loads the production extension and starts its installed service in a separate project', async () => {
   const supplied = JSON.parse(fs.readFileSync(path.join(install, 'package.json'), 'utf8'));

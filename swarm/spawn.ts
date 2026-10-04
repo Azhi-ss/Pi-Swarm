@@ -324,8 +324,11 @@ function createArgs(state: SpawnState, model?: string): string[] {
     }
   }
   args.push('--extension', EXTENSION_DIR);
+  // Pi discovers ~/.agents/skills by itself. Without this, that catalog is
+  // copied into every peer prompt and the first turn stalls.
+  args.push('--no-skills');
 
-  // Inherit non-extension skills so spawned agents can use cdp, zele, etc.
+  // Skills this swarm found are still passed explicitly.
   for (const skillPath of discoverSkills(state.cwd)) {
     args.push('--skill', skillPath);
   }
