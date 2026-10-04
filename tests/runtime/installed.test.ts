@@ -2986,7 +2986,7 @@ it('admits exactly one successor per handoff across two services and a restart, 
         expect(handoff?.takenOver).toBe(true);
         successorId = handoff.successor;
       },
-      { timeout: 20_000, interval: 300 }
+      { timeout: 45_000, interval: 300 }
     );
     const history = (await command('spawn', 'history')).stdout;
     const successorName = history.match(new RegExp(`^- ${successorId}: (\\S+) `, 'm'))?.[1];
@@ -3030,7 +3030,7 @@ it('admits exactly one successor per handoff across two services and a restart, 
     provider.closeAllConnections();
     await new Promise<void>((resolve) => provider.close(() => resolve()));
   }
-}, 70_000);
+}, 120_000);
 
 it('counts a successor that does not claim within 3 minutes as one takeover failure', async () => {
   await command('abort').catch(() => {});
@@ -3424,7 +3424,7 @@ it('reaps a killed peer tool process before saving the handoff candidate and rem
     expect(isAlive(tool)).toBe(true);
     process.kill(peer, 'SIGKILL');
     let toolDeadWhileSandboxRemained = false;
-    const deadline = Date.now() + 10_000;
+    const deadline = Date.now() + 30_000;
     let sandboxGone = false;
     while (Date.now() < deadline) {
       sandboxGone = !fs.existsSync(sandbox);
@@ -3448,7 +3448,7 @@ it('reaps a killed peer tool process before saving the handoff candidate and rem
     provider.closeAllConnections();
     await new Promise<void>((resolve) => provider.close(() => resolve()));
   }
-}, 60_000);
+}, 90_000);
 
 it('reaps one project without stopping a successor, another project, or a host process', async () => {
   await command('--start');

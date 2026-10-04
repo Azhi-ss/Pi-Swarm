@@ -73,8 +73,8 @@ describe('Adversarial Test Suite: Module 3 Four-Zone Blackboard & Soft Staking w
       const currentTask = taskStore.getTask(cwd, sessionId, task.id);
       expect(currentTask!.claimed_by).toBe('Agent-A');
 
-      // 3. Wait for TTL to lapse (1.15s)
-      await sleep(1150);
+      // 3. Wait for TTL to lapse. 1s of lease plus slack for a busy runner.
+      await sleep(3000);
 
       // Verify isLeaseExpired reports true
       const expiredTask = taskStore.getTask(cwd, sessionId, task.id)!;

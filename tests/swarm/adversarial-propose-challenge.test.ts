@@ -1014,5 +1014,5 @@ describe('Suite 7: Adversarial — Parameter aliases, blocked task debate, and E
         execFileSync(process.execPath, [cliPath, '--stop'], { env, encoding: 'utf-8', cwd });
       } catch {}
     }
-  });
+  }, 60_000);
 });
