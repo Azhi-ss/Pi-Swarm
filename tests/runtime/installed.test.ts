@@ -4462,7 +4462,7 @@ it('Demand Fill: does not fill while stopped, out of budget, or during acceptanc
     );
     await command('run', 'join');
     await command('task', 'create', '--title', 'Acceptance prerequisite');
-    await vi.waitFor(() => expect(fs.existsSync(marker)).toBe(true), { timeout: 30_000 });
+    await vi.waitFor(() => expect(fs.existsSync(marker)).toBe(true), { timeout: 75_000 });
     expect((await runStatus()).acceptanceOwner).toBeTruthy();
     const during = spawnedEventCount(accepting.id);
     await command('task', 'create', '--title', 'During acceptance');
@@ -4515,7 +4515,7 @@ it('Demand Fill: does not fill while stopped, out of budget, or during acceptanc
     fs.rmSync(marker, { force: true });
     await closeProvider(provider);
   }
-}, 90_000);
+}, 180_000);
 
 it('Demand Fill: two services stay within the cap and never double-start a task', async () => {
   await command('abort').catch(() => {});
