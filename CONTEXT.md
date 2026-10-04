@@ -11,8 +11,20 @@ An agent instance in the swarm mesh. All peers have identical privileges — no 
 _Avoid_: Worker, slave, subordinate, child agent
 
 **Delegator**:
-The primary coding agent facing the human developer. Publishes goal specifications to the Blackboard and observes progress, but never micromanages peer execution.
-_Avoid_: Orchestrator, coordinator, master agent
+The agent facing the human. It asks which Launch Tier to use, starts that Cohort, and afterward only reads the Blackboard back to the human. It does not assign roles or hypotheses.
+_Avoid_: Orchestrator, coordinator, master agent, 主 Agent
+
+**Launch Tier**:
+The human's choice of Cohort size before a launch. The first tier is 4 Peer Nodes, the second is 16, and the third is a number the human states. The number started is the minimum of that choice and the Width Cap.
+_Avoid_: 档, mode, preset, agent count
+
+**Cohort**:
+The Peer Nodes started together from one Launch Tier. They share one problem statement and have no assigned roles. The Delegator is not a member. A Cohort starts with no tasks.
+_Avoid_: team, worker pool, subagent batch, squad
+
+**Peer Message**:
+A message one Peer Node sends to another Peer Node, inserted into the recipient's context. Inside a Cohort, this is how peers cooperate.
+_Avoid_: assignment, task, report to the Delegator, mention
 
 **Flat Mesh**:
 The network topology connecting all peer nodes. No hierarchy, no hub-and-spoke — every node can read the Blackboard, stake hypotheses, and submit verified results.
@@ -29,7 +41,7 @@ The section of the Blackboard holding task specifications, acceptance criteria, 
 _Avoid_: Backlog, task list
 
 **Soft Staking Zone** _(Zone 2)_:
-The section where peers declare which hypothesis they intend to explore, protected by a time-limited Lease.
+The section where peers declare which hypothesis they intend to explore, protected by a time-limited Lease. A Cohort does not use it to divide work.
 _Avoid_: Assignment, hard lock, claim queue
 
 **Verified Zone** _(Zone 3)_:

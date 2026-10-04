@@ -1030,6 +1030,12 @@ Environment:
         const context = extractFlag(args, 'context');
         const messageFile = extractFlag(args, 'message-file');
         const force = extractFlagBool(args, 'force');
+        const cohortRaw = extractFlag(args, 'cohort');
+        const cohort = cohortRaw ? Number.parseInt(cohortRaw, 10) : undefined;
+        if (cohortRaw && (!Number.isInteger(cohort) || (cohort ?? 0) < 2)) {
+          process.stderr.write('Error: --cohort must be an integer >= 2.\n');
+          process.exit(1);
+        }
 
         // --message-file takes priority: read mission text from a file to avoid
         // shell interpolation of backticks, ${...}, and parentheses in the prompt.
@@ -1066,6 +1072,7 @@ Environment:
             context: context || undefined,
             message: message || undefined,
             force: force || undefined,
+            cohort,
           })
         );
       }

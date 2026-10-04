@@ -305,6 +305,7 @@ export const COMMAND_REGISTRY: CommandSpec[] = [
       'context',
       'message-file',
       'force',
+      'cohort',
     ],
   },
   {

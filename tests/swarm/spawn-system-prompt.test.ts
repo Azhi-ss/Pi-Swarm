@@ -26,6 +26,7 @@ vi.mock('../../swarm/live-progress.js', () => ({
 }));
 
 import { spawnSubagent, clearSpawnStateForTests } from '../../swarm/spawn.js';
+import { startRun } from '../../swarm/run-store.js';
 
 class FakeProcess extends EventEmitter {
   stdout = new EventEmitter();
@@ -104,5 +105,59 @@ describe('swarm spawn system prompt', () => {
 
     proc.emit('close', 0);
     expect(fs.existsSync(path.dirname(promptPath))).toBe(false);
+  });
+
+  it('tells a cohort they have partners and no assigned labor', () => {
+    const cwd = createTempCwd();
+    const proc = new FakeProcess();
+    spawnMock.mockReturnValue(proc as any);
+
+    const spawned = spawnSubagent(
+      cwd,
+      {
+        cohort: 4,
+        objective: 'Solve the problem in this directory.',
+        name: 'PeerA',
+      },
+      'cohort-session'
+    );
+
+    expect(spawned.systemPrompt).toContain(
+      'You and 3 other peers are solving the same problem. There is no division of labor.'
+    );
+    expect(spawned.systemPrompt).toContain('pi-messenger-swarm peers');
+    expect(spawned.systemPrompt).toContain('The message is inserted into their context.');
+    expect(spawned.systemPrompt).not.toContain('specialized');
+
+    proc.emit('close', 0);
+  });
+
+  it('admits a Cohort spawn of 4 with only a problem statement during an active Swarm Run', () => {
+    const cwd = createTempCwd();
+    const run = startRun(cwd, { goal: 'One shared problem', delegator: 'Delegator' });
+    const proc = new FakeProcess();
+    spawnMock.mockReturnValue(proc as any);
+
+    expect(() => spawnSubagent(cwd, { message: 'Unbound worker', name: 'Lone' }, run.id)).toThrow(
+      'Spawn is not bound to a Claimable Task.'
+    );
+
+    const spawned = spawnSubagent(
+      cwd,
+      {
+        cohort: 4,
+        message: 'Reduce the failing test to one assertion.',
+        name: 'PeerA',
+      },
+      run.id
+    );
+
+    expect(spawned.taskId).toBeUndefined();
+    expect(spawned.systemPrompt).toContain('3 other peers');
+    expect(spawned.systemPrompt).toContain('no division of labor');
+    expect(spawned.systemPrompt).toContain('The message is inserted into their context.');
+    expect(spawned.systemPrompt).not.toContain('specialized');
+
+    proc.emit('close', 0);
   });
 });

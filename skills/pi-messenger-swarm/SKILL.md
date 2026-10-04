@@ -10,8 +10,8 @@ Multi-agent coordination via the `pi-messenger-swarm` CLI.
 The CLI auto-spawns a long-lived HTTP server (the **harness**) on first use. Every call dispatches an action to the harness, which holds persistent state — agent registrations, task store, feed — across calls.
 
 - No fixed planner/worker/reviewer roles
-- Any joined or spawned agent can create/claim/complete tasks
-- When you spawn agents for tasks, act as coordinator — delegate, don't hoard
+- A launch is N identical peers on the same problem. The Delegator asks for a tier, starts them, then stops directing
+- Peers message each other. Messages enter the recipient's context. There is no analysis gate
 
 ## Setup
 
@@ -26,6 +26,30 @@ pi-messenger-swarm join
 pi-messenger-swarm task list
 pi-messenger-swarm swarm
 ```
+
+## Launch
+
+Use this when the user asks to start the swarm. Do not assign roles, hypotheses, or tasks.
+
+1. Confirm this skill is the one loaded, then ask exactly:
+
+```text
+使用哪一档？一档 4 个，二档 16 个，三档请给一个数字。
+```
+
+2. Tier 1 is 4. Tier 2 is 16. Tier 3 is the positive integer they give.
+3. The number you launch is `min(requested, maxConcurrentSpawns)`. Say both numbers in the same reply. Do not choose a smaller count yourself. To go past the cap, they raise `maxConcurrentSpawns` in `.pi/pi-messenger.json` first. The default cap is `min(6, cpuCount - 1)`.
+4. Spawn that many peers with the same mission text (the problem statement), the same model, no `--role`, and no `--task-id`. Do not create tasks for them. The Delegator is not one of the N:
+
+```bash
+pi-messenger-swarm spawn --cohort N "the problem statement"
+```
+
+`--cohort` is the number actually launched. Each peer's prompt then says they share the problem with N-1 others and may message any of them at any time.
+
+5. After the spawn calls, do not message peers, do not claim their work, and do not pick a winner.
+6. When the user asks what happened, read `pi-messenger-swarm explain` and report what is written.
+7. When a verified artifact appears on the blackboard, report that once.
 
 ## Core protocol
 
@@ -207,17 +231,11 @@ When asked what the swarm is doing, admit the bounded `BLACKBOARD.md` projection
 
 When the human requests an emergency stop, use `pi-messenger-swarm abort --reason "..."`. It broadcasts `swarm.abort`, kills this project's peer process groups with `SIGKILL`, reclaims their sandboxes and preserves verified facts. `swarm.abort` remains an action alias.
 
-### Spawn-and-delegate, don't hoard
+### After launch, stop directing
 
-When you spawn subagents, you are the coordinator. You create the tasks, spawn the agents, then **step back**. Let the agents claim and execute their assigned work — do not claim those tasks yourself.
+The launch question is the last instruction to the peers. Do not create roles, do not hand out hypotheses, and do not message them to steer the work.
 
-Your role after spawning:
-
-- Monitor progress via `pi-messenger-swarm swarm` or `pi-messenger-swarm feed`
-- Unblock agents when they hit problems (share context, clarify scope)
-- Handle only tasks you did **not** delegate to a subagent
-
-Anti-pattern: spawning agents then claiming all tasks yourself. This leaves spawned agents idle with nothing to do.
+Read the blackboard when the user asks. Report a verified artifact once, when it appears. Peers talk to each other with `send`. They do not submit their work to the Delegator.
 
 ### Collaborate, don't micromanage
 

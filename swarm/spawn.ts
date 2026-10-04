@@ -203,7 +203,19 @@ function buildSwarmProtocol(): string {
   ].join('\n');
 }
 
+function partnerNotice(cohort: number): string {
+  const others = cohort - 1;
+  const noun = others === 1 ? 'peer' : 'peers';
+  return [
+    '## Partners',
+    `You and ${others} other ${noun} are solving the same problem. There is no division of labor.`,
+    'Run `pi-messenger-swarm peers` to see their names.',
+    'Message any of them whenever you want. The message is inserted into their context.',
+  ].join('\n');
+}
+
 function buildSystemPrompt(request: SpawnRequest): string {
+  const cohort = request.cohort && request.cohort >= 2 ? Math.floor(request.cohort) : undefined;
   const role = formatRoleLabel(request.role ?? 'Peer');
   const persona = request.persona?.trim();
   const objective = (request.objective ?? request.message ?? '').trim();
@@ -212,7 +224,9 @@ function buildSystemPrompt(request: SpawnRequest): string {
     '# Swarm Peer Agent Role',
     '',
     '## Role Description',
-    `You are a specialized ${role} operating as an autonomous peer agent inside a collaborative swarm.`,
+    cohort
+      ? 'You are a peer solving the same problem as the others in this launch.'
+      : `You are a specialized ${role} operating as an autonomous peer agent inside a collaborative swarm.`,
   ];
 
   if (persona) {
@@ -227,6 +241,7 @@ function buildSystemPrompt(request: SpawnRequest): string {
   if (request.taskId) lines.push('', '## Assigned Task', `Primary task: ${request.taskId}`);
 
   lines.push('', buildSwarmProtocol());
+  if (cohort) lines.push('', partnerNotice(cohort));
 
   return lines.join('\n');
 }
@@ -577,7 +592,10 @@ export function spawnSubagent(
   const width = run && computeWidth(cwd, run);
   if (width && width.live >= width.cap) throw new Error(widthFullMessage(width));
   // Re-checked under the caller's Project Run lock, immediately before start.
-  if (run && run.status === 'active') {
+  // A Cohort member shares a problem statement and is not bound to a Claimable Task.
+  const cohortWithoutTask =
+    typeof request.cohort === 'number' && request.cohort >= 2 && !request.taskId;
+  if (run && run.status === 'active' && !cohortWithoutTask) {
     const reason = claimableRejection(cwd, run, request.taskId);
     if (reason) throw new Error(reason);
   }
@@ -605,8 +623,12 @@ export function spawnSubagent(
   } else {
     systemPrompt = buildSystemPrompt(request);
     prompt = buildPrompt(request);
-    role = request.role || 'Subagent';
+    role = request.role || (request.cohort && request.cohort >= 2 ? 'Peer' : 'Subagent');
     objective = request.objective || request.message || '';
+  }
+
+  if (request.agentFile && request.cohort && request.cohort >= 2) {
+    systemPrompt += '\n\n' + partnerNotice(Math.floor(request.cohort));
   }
 
   // Allocate dedicated worktree sandbox

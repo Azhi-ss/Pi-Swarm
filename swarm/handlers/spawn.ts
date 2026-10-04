@@ -263,6 +263,10 @@ function spawnCreate(
 
     // File-based spawn mode
     if (params.agentFile) {
+      const cohort =
+        typeof params.cohort === 'number' && params.cohort >= 2
+          ? Math.floor(params.cohort)
+          : undefined;
       const request: SpawnRequest = {
         agentFile: params.agentFile,
         model: params.model,
@@ -271,6 +275,7 @@ function spawnCreate(
         context: params.context,
         taskId: params.taskId,
         name: params.name,
+        cohort,
       };
 
       try {
@@ -306,7 +311,11 @@ function spawnCreate(
       });
     }
 
-    const role = params.role?.trim() || params.title?.trim() || 'Subagent';
+    const cohort =
+      typeof params.cohort === 'number' && params.cohort >= 2
+        ? Math.floor(params.cohort)
+        : undefined;
+    const role = params.role?.trim() || params.title?.trim() || (cohort ? 'Peer' : 'Subagent');
     const request: SpawnRequest = {
       role,
       persona: params.persona,
@@ -315,6 +324,7 @@ function spawnCreate(
       context: params.context,
       taskId: params.taskId,
       name: params.name,
+      cohort,
     };
 
     try {

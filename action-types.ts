@@ -57,6 +57,7 @@ export interface MessengerActionParams {
   agentFile?: string;
   messageFile?: string;
   force?: boolean;
+  cohort?: number;
 
   // Process / Watchdog
   all?: boolean;

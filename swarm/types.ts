@@ -129,6 +129,8 @@ export interface SpawnRequest {
   taskId?: string;
   name?: string;
   agentFile?: string; // Path to markdown file (with YAML frontmatter) to use as system prompt
+  /** Peers launched together. When >= 2, the system prompt names the other partners. */
+  cohort?: number;
 }
 
 export interface SpawnedAgent {
