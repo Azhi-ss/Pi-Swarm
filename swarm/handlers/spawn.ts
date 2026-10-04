@@ -201,6 +201,25 @@ function spawnCreate(
   // and making the whole swarm appear stuck.
   // Recheck under the Project Run lock and start before releasing it.
   return withRunLock(cwd, () => {
+    const running = listSpawned(cwd, sessionId);
+    const caller = running.find((agent) => agent.name === state.agentName);
+    if (caller?.cohort && caller.cohort >= 2) {
+      return result('Error: A Peer Node in a Cohort cannot spawn another Peer Node.', {
+        mode: 'spawn',
+        error: 'cohort_closed',
+      });
+    }
+    const requested =
+      typeof params.cohort === 'number' && params.cohort >= 2
+        ? Math.floor(params.cohort)
+        : undefined;
+    if (requested && running.filter((agent) => agent.cohort === requested).length >= requested) {
+      return result(`Error: A Cohort of ${requested} Peer Nodes is already started.`, {
+        mode: 'spawn',
+        error: 'cohort_closed',
+      });
+    }
+
     const run = readRun(cwd);
     if (run && run.id === sessionId) {
       if (run.status === 'aborted') {

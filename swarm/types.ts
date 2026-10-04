@@ -162,4 +162,6 @@ export interface SpawnedAgent {
   sandboxRetained?: boolean;
   port?: number;
   testPort?: number;
+  /** Cohort size this Peer Node was started with. Absent outside a Cohort. */
+  cohort?: number;
 }

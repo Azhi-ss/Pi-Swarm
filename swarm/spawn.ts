@@ -654,6 +654,9 @@ export function spawnSubagent(
     worktreePath: worktree.worktreePath,
     port: worktree.port,
     testPort: worktree.testPort,
+    ...(typeof request.cohort === 'number' && request.cohort >= 2
+      ? { cohort: Math.floor(request.cohort) }
+      : {}),
   };
   record.systemPrompt = systemPrompt;
 

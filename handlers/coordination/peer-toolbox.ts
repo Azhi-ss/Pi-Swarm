@@ -4,6 +4,7 @@ import { getActiveAgents } from '../../store/agents.js';
 import { getEffectiveSessionId, normalizeCwd } from '../../store/shared.js';
 import * as taskStore from '../../swarm/task-store.js';
 import { findSpawnedAgentByName, listSpawned } from '../../swarm/spawn.js';
+import { readRun } from '../../swarm/run-store.js';
 import { getWorktreeInfo } from '../../swarm/worktree/index.js';
 import type { SwarmTask } from '../../swarm/types.js';
 import { result } from '../result.js';
@@ -52,25 +53,45 @@ export function executeSelfStatus(state: MessengerState, cwd: string) {
   return result(JSON.stringify(status, null, 2), { mode: 'status.self', ...status });
 }
 
+function peerTasks(tasks: SwarmTask[], name: string) {
+  return tasks
+    .filter(
+      (task) =>
+        task.claimed_by === name &&
+        (task.status === 'staked' || task.status === 'in_progress') &&
+        !taskStore.isLeaseExpired(task)
+    )
+    .map(taskStatus);
+}
+
 export function executePeers(state: MessengerState, dirs: Dirs, cwd: string, taskId?: string) {
   const sessionId = getEffectiveSessionId(cwd, state);
   const tasks = taskStore.getAllTasks(cwd, sessionId);
   const spawned = listSpawned(cwd, sessionId);
-  const peers = getActiveAgents({ ...state, scopeToFolder: false }, dirs)
-    .filter((peer) => !peer.isHuman && belongsToProject(peer.cwd, cwd) && isProcessAlive(peer.pid))
-    .map((peer) => ({
-      name: peer.name,
-      agentId: spawned.find((agent) => agent.name === peer.name)?.id ?? peer.name,
-      pid: peer.pid,
-      tasks: tasks
+  const caller = spawned.find((agent) => agent.name === state.agentName);
+  const cohort = caller?.cohort && caller.cohort >= 2 ? caller.cohort : undefined;
+  const listed = cohort
+    ? spawned
         .filter(
-          (task) =>
-            task.claimed_by === peer.name &&
-            (task.status === 'staked' || task.status === 'in_progress') &&
-            !taskStore.isLeaseExpired(task)
+          (agent) =>
+            agent.cohort === cohort &&
+            agent.name !== state.agentName &&
+            agent.name !== readRun(cwd)?.delegator &&
+            !!agent.pid &&
+            isProcessAlive(agent.pid)
         )
-        .map(taskStatus),
-    }))
+        .map((agent) => ({ name: agent.name, agentId: agent.id, pid: agent.pid! }))
+    : getActiveAgents({ ...state, scopeToFolder: false }, dirs)
+        .filter(
+          (peer) => !peer.isHuman && belongsToProject(peer.cwd, cwd) && isProcessAlive(peer.pid)
+        )
+        .map((peer) => ({
+          name: peer.name,
+          agentId: spawned.find((agent) => agent.name === peer.name)?.id ?? peer.name,
+          pid: peer.pid,
+        }));
+  const peers = listed
+    .map((peer) => ({ ...peer, tasks: peerTasks(tasks, peer.name) }))
     .filter((peer) => !taskId || peer.tasks.some((task) => task.id === taskId));
   return result(JSON.stringify(peers, null, 2), { mode: 'peers', peers });
 }
